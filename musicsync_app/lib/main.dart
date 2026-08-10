@@ -13,15 +13,25 @@ import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:provider/provider.dart';
+
+// Importurile tale de teme
 import 'themes/theme_provider.dart';
 import 'themes/app_themes.dart';
 import 'widgets/dynamic_player.dart';
-
 import 'download_service.dart';
 
-// just_audio_background handles the OS media session, notification controls,
-// lock screen, headphone buttons, and wake lock automatically.
-// No custom AudioHandler needed.
+// ==========================================
+// ENUM MOOD FIX
+// ==========================================
+enum SongMood {
+  chill,
+  hype,
+  energetic,
+  acoustic,
+  party,
+}
+
+enum SongSortOrder { oldestFirst, newestFirst }
 
 // ==========================================
 // UTILITY: EXTRAGERE ARTIST & TITLU
@@ -103,12 +113,9 @@ class GoogleAuthManager {
   }
 }
 
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // just_audio_background initialises the foreground service, media session,
-  // notification controls, lock screen, headphone buttons, and wake lock.
   await JustAudioBackground.init(
     androidNotificationChannelId: 'com.example.musicsync_app.audio',
     androidNotificationChannelName: 'MusicSync Player',
@@ -116,12 +123,11 @@ void main() async {
     androidStopForegroundOnPause: true,
   );
 
-  // Configure audio_session for music playback focus.
   try {
     final session = await AudioSession.instance;
     await session.configure(const AudioSessionConfiguration.music());
   } catch (e) {
-    debugPrint('[AudioSession] configure failed: \$e');
+    debugPrint('[AudioSession] configure failed: $e');
   }
 
   await DownloadNotificationManager.init();
@@ -137,11 +143,6 @@ void main() async {
   );
 }
 
-// ADAUGAT: greekAesthetic și turkicAesthetic în listă
-enum AppThemeMode { light, dark, jetbrainsHighContrast, nordic, neon, greekAesthetic, turkicAesthetic }
-enum SongSortOrder { oldestFirst, newestFirst }
-enum SongMood { chill, energetic, happy, sad }
-
 // ==========================================
 // GLOBAL AUDIO PLAYER STATE
 // ==========================================
@@ -152,8 +153,6 @@ class GlobalAudioState extends ChangeNotifier {
     _initListeners();
   }
 
-  // just_audio's AudioPlayer — works with just_audio_background for
-  // screen-off playback, notification controls, and wake lock automatically.
   final AudioPlayer audioPlayer = AudioPlayer();
 
   List<File> playlistFiles = [];
@@ -170,7 +169,6 @@ class GlobalAudioState extends ChangeNotifier {
   Duration position = Duration.zero;
 
   void _initListeners() {
-    // just_audio uses streams instead of callbacks.
     audioPlayer.playerStateStream.listen((state) {
       isPlaying = state.playing;
       notifyListeners();
@@ -186,8 +184,6 @@ class GlobalAudioState extends ChangeNotifier {
       notifyListeners();
     });
 
-    // Autoplay: when a song finishes, advance to the next one.
-    // just_audio fires processingState == completed when the track ends.
     audioPlayer.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
         playNext();
@@ -215,8 +211,6 @@ class GlobalAudioState extends ChangeNotifier {
     currentSongTitle = meta.title;
     currentArtist = meta.artist;
 
-    // AudioSource.file with tag — just_audio_background reads the tag to
-    // populate the notification with title, artist, and album automatically.
     final source = AudioSource.file(
       file.path,
       tag: MediaItem(
@@ -266,165 +260,29 @@ class GlobalAudioState extends ChangeNotifier {
 }
 
 // ==========================================
-// APP INITIALIZATION & THEMES
+// APP INITIALIZATION
 // ==========================================
-class MusicSyncApp extends StatefulWidget {
+class MusicSyncApp extends StatelessWidget {
   const MusicSyncApp({super.key});
 
   @override
-  State<MusicSyncApp> createState() => _MusicSyncAppState();
-}
-
-class _MusicSyncAppState extends State<MusicSyncApp> {
-  AppThemeMode _currentTheme = AppThemeMode.jetbrainsHighContrast;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadSavedTheme();
-  }
-
-  // Ajutător pentru sincronizarea cu noul tău motor de teme din lib/
-  void _syncWithLibraryThemeProvider(AppThemeMode mode) {
-    if (!mounted) return;
-    final provider = Provider.of<ThemeProvider>(context, listen: false);
-    
-    if (mode == AppThemeMode.greekAesthetic) {
-      provider.switchTheme('grecia');
-    } else if (mode == AppThemeMode.turkicAesthetic) {
-      provider.switchTheme('iran');
-    }
-  }
-
-  Future<void> _loadSavedTheme() async {
-    final prefs = await SharedPreferences.getInstance();
-    final themeIndex = prefs.getInt('app_theme') ?? AppThemeMode.jetbrainsHighContrast.index;
-    
-    setState(() {
-      _currentTheme = AppThemeMode.values[themeIndex];
-    });
-
-    // Sincronizează tema estetică la pornirea aplicației
-    _syncWithLibraryThemeProvider(_currentTheme);
-  }
-
-  Future<void> _setTheme(AppThemeMode theme) async {
-    setState(() {
-      _currentTheme = theme;
-    });
-    
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('app_theme', theme.index);
-
-    // Sincronizează tema estetică imediat ce userul o schimbă din Hub
-    _syncWithLibraryThemeProvider(theme);
-  }
-
-  ThemeData _getThemeData() {
-    switch (_currentTheme) {
-      case AppThemeMode.light:
-        return ThemeData(
-          brightness: Brightness.light,
-          primarySwatch: Colors.deepPurple,
-          scaffoldBackgroundColor: const Color(0xFFF5F5F7),
-          cardColor: Colors.white,
-          appBarTheme: const AppBarTheme(backgroundColor: Colors.deepPurple, foregroundColor: Colors.white),
-        );
-      case AppThemeMode.dark:
-        return ThemeData(
-          brightness: Brightness.dark,
-          scaffoldBackgroundColor: const Color(0xFF121212),
-          cardColor: const Color(0xFF1E1E1E),
-          appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF1F1F1F), foregroundColor: Colors.white),
-        );
-      case AppThemeMode.jetbrainsHighContrast:
-        return ThemeData(
-          brightness: Brightness.dark,
-          scaffoldBackgroundColor: Colors.black,
-          cardColor: const Color(0xFF141414),
-          colorScheme: const ColorScheme.dark(
-            primary: Color(0xFFFFE600),
-            secondary: Color(0xFF00FF66),
-          ),
-          appBarTheme: const AppBarTheme(
-            backgroundColor: Colors.black,
-            foregroundColor: Color(0xFFFFE600),
-          ),
-        );
-      case AppThemeMode.nordic:
-        return ThemeData(
-          brightness: Brightness.dark,
-          scaffoldBackgroundColor: const Color(0xFF2E3440),
-          cardColor: const Color(0xFF3B4252),
-          colorScheme: const ColorScheme.dark(
-            primary: Color(0xFF88C0D0),
-            secondary: Color(0xFFA3BE8C),
-          ),
-          appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF242933), foregroundColor: Color(0xFF88C0D0)),
-        );
-      case AppThemeMode.neon:
-        return ThemeData(
-          brightness: Brightness.dark,
-          scaffoldBackgroundColor: const Color(0xFF0F051D),
-          cardColor: const Color(0xFF29104D),
-          colorScheme: const ColorScheme.dark(
-            primary: Color(0xFFFF007F),
-            secondary: Color(0xFF00F0FF),
-          ),
-          appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF1A0933), foregroundColor: Color(0xFF00F0FF)),
-        );
-      case AppThemeMode.greekAesthetic:
-        return ThemeData(
-          brightness: Brightness.light,
-          scaffoldBackgroundColor: const Color(0xFFF4F7F6),
-          cardColor: Colors.white,
-          colorScheme: const ColorScheme.light(
-            primary: Color(0xFF0D47A1), 
-            secondary: Color(0xFF4FC3F7),
-          ),
-          appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF0D47A1), foregroundColor: Colors.white),
-        );
-      case AppThemeMode.turkicAesthetic:
-        return ThemeData(
-          brightness: Brightness.dark,
-          scaffoldBackgroundColor: const Color(0xFF1C1310),
-          cardColor: const Color(0xFF2E1F1A),
-          colorScheme: const ColorScheme.dark(
-            primary: Color(0xFFD84315), 
-            secondary: Color(0xFF00ACC1),
-          ),
-          appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF2E1F1A), foregroundColor: Color(0xFF00ACC1)),
-        );
-    }
-  }
-
-
-  @override
   Widget build(BuildContext context) {
+    final themeProvider = Provider.of<ThemeProvider>(context);
+
     return MaterialApp(
       title: 'MusicSync',
       debugShowCheckedModeBanner: false,
-      theme: _getThemeData(),
-      home: MainHubScreen(
-        currentTheme: _currentTheme,
-        onThemeChanged: _setTheme,
-      ),
+      theme: themeProvider.themeData,
+      home: const MainHubScreen(),
     );
   }
 }
 
 // ==========================================
-// MAIN HUB SCREEN (REPARAT ALINIERE / OFFSET ICONURI)
+// MAIN HUB SCREEN
 // ==========================================
 class MainHubScreen extends StatefulWidget {
-  final AppThemeMode currentTheme;
-  final Function(AppThemeMode) onThemeChanged;
-
-  const MainHubScreen({
-    super.key,
-    required this.currentTheme,
-    required this.onThemeChanged,
-  });
+  const MainHubScreen({super.key});
 
   @override
   State<MainHubScreen> createState() => _MainHubScreenState();
@@ -470,6 +328,8 @@ class _MainHubScreenState extends State<MainHubScreen> {
   }
 
   void _showThemePicker() {
+    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+
     showDialog(
       context: context,
       builder: (context) {
@@ -480,58 +340,42 @@ class _MainHubScreenState extends State<MainHubScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 ListTile(
-                  leading: const Icon(Icons.bolt, color: Color(0xFFFFE600)),
-                  title: const Text('JetBrains High Contrast (Dark)'),
+                  leading: const Icon(Icons.location_city, color: Colors.blue),
+                  title: const Text('Grecia Aesthetic'),
                   onTap: () {
-                    widget.onThemeChanged(AppThemeMode.jetbrainsHighContrast);
+                    themeProvider.switchTheme('grecia');
                     Navigator.pop(context);
                   },
                 ),
                 ListTile(
-                  leading: const Icon(Icons.ac_unit, color: Color(0xFF88C0D0)),
-                  title: const Text('JetBrains Nordic Frost'),
+                  leading: const Icon(Icons.terrain, color: Colors.deepOrange),
+                  title: const Text('Turkic Aesthetic'),
                   onTap: () {
-                    widget.onThemeChanged(AppThemeMode.nordic);
+                    themeProvider.switchTheme('turcia');
                     Navigator.pop(context);
                   },
                 ),
                 ListTile(
-                  leading: const Icon(Icons.color_lens, color: Color(0xFFFF007F)),
-                  title: const Text('Vivid Cyber Neon'),
+                  leading: const Icon(Icons.terrain, color: Colors.deepOrange),
+                  title: const Text('Iran Aesthetic'),
                   onTap: () {
-                    widget.onThemeChanged(AppThemeMode.neon);
+                    themeProvider.switchTheme('iran');
                     Navigator.pop(context);
                   },
                 ),
                 ListTile(
-                  leading: const Icon(Icons.account_balance, color: Color(0xFF0D47A1)),
-                  title: const Text('Greek Statue Aesthetic'),
+                  leading: const Icon(Icons.terrain, color: Colors.deepOrange),
+                  title: const Text('Armenia'),
                   onTap: () {
-                    widget.onThemeChanged(AppThemeMode.greekAesthetic);
+                    themeProvider.switchTheme('armenia');
                     Navigator.pop(context);
                   },
                 ),
                 ListTile(
-                  leading: const Icon(Icons.brightness_low, color: Color(0xFFD84315)),
-                  title: const Text('Turkic Nomad Aesthetic'),
+                  leading: const Icon(Icons.terrain, color: Colors.deepOrange),
+                  title: const Text('Azerbaijan Aesthetic'),
                   onTap: () {
-                    widget.onThemeChanged(AppThemeMode.turkicAesthetic);
-                    Navigator.pop(context);
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.nightlight_round, color: Colors.blueGrey),
-                  title: const Text('Dark Standard'),
-                  onTap: () {
-                    widget.onThemeChanged(AppThemeMode.dark);
-                    Navigator.pop(context);
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.wb_sunny, color: Colors.orange),
-                  title: const Text('Light Classic'),
-                  onTap: () {
-                    widget.onThemeChanged(AppThemeMode.light);
+                    themeProvider.switchTheme('azerbaijan');
                     Navigator.pop(context);
                   },
                 ),
@@ -547,13 +391,12 @@ class _MainHubScreenState extends State<MainHubScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final audioState = Provider.of<GlobalAudioState>(context);
-    
     final themeProvider = Provider.of<ThemeProvider>(context);
-    final currentCountryTheme = themeProvider.currentTheme;
     
+    final currentCountryTheme = themeProvider.currentTheme;
     final currentMood = audioState.currentMood;
 
-    final moodColors = (currentCountryTheme != null && currentCountryTheme.playerMoods[currentMood] != null)
+    final moodColors = (currentCountryTheme.playerMoods != null && currentCountryTheme.playerMoods[currentMood] != null)
         ? currentCountryTheme.playerMoods[currentMood]!
         : PlayerColors(
             gradientColors: [theme.colorScheme.primary, theme.colorScheme.secondary],
@@ -562,7 +405,7 @@ class _MainHubScreenState extends State<MainHubScreen> {
           );
 
     return Scaffold(
-      backgroundColor: currentCountryTheme?.scaffoldBackground ?? theme.scaffoldBackgroundColor,
+      backgroundColor: currentCountryTheme.scaffoldBackground,
       appBar: AppBar(
         title: const Text("MusicSync Hub", style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
@@ -580,9 +423,6 @@ class _MainHubScreenState extends State<MainHubScreen> {
               ),
             ),
           IconButton(
-            alignment: Alignment.center,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
             icon: const Icon(Icons.palette_outlined),
             onPressed: _showThemePicker,
             tooltip: "Schimbă Tema",
@@ -590,220 +430,203 @@ class _MainHubScreenState extends State<MainHubScreen> {
           const SizedBox(width: 8),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  // STATUT CONEXIUNE (ONLINE / OFFLINE)
-                  Center(
-                    child: Container(
-                      constraints: const BoxConstraints(maxWidth: 600),
-                      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
-                      decoration: BoxDecoration(
-                        color: _isOffline ? const Color(0xFF4A1010) : const Color(0xFF154314),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: _isOffline ? Colors.redAccent : Colors.greenAccent,
-                          width: 1.5,
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Icon(
-                            _isOffline ? Icons.wifi_off : Icons.wifi, 
-                            color: Colors.white, 
-                            size: 20
-                          ),
-                          const SizedBox(width: 12),
-                          Flexible(
-                            child: Text(
-                              _isOffline
-                                  ? "MOD OFFLINE - Player-ul Local este disponibil"
-                                  : "CONECTAT - Downloader & Player activated",
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-
-                  // CARD 1: DOWNLOADER & SYNC
-                  Center(
-                    child: Container(
-                      constraints: const BoxConstraints(maxWidth: 800, maxHeight: 180),
-                      child: Card(
-                        elevation: 4,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          side: BorderSide(
-                            color: _isOffline ? Colors.grey : (moodColors.gradientColors.firstOrNull ?? theme.colorScheme.primary), 
-                            width: 2,
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24.0),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    // STATUT CONEXIUNE
+                    Center(
+                      child: Container(
+                        constraints: const BoxConstraints(maxWidth: 600),
+                        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 24),
+                        decoration: BoxDecoration(
+                          color: _isOffline ? const Color(0xFF4A1010) : const Color(0xFF154314),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _isOffline ? Colors.redAccent : Colors.greenAccent,
+                            width: 1.5,
                           ),
                         ),
-                        child: Stack(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            InkWell(
-                              onTap: _isOffline
-                                  ? null
-                                  : () async {
-                                      await Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (context) => const MusicSyncHomePage(),
-                                        ),
-                                      );
-                                      _loadUserEmail();
-                                    },
-                              borderRadius: BorderRadius.circular(16),
-                              child: Padding(
-                                padding: const EdgeInsets.all(24.0),
-                                child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  crossAxisAlignment: CrossAxisAlignment.center,
-                                  children: [
-                                    SizedBox(
-                                      height: 54,
-                                      child: Center(
-                                        child: Icon(
-                                          Icons.cloud_download, 
-                                          size: 54, 
-                                          color: _isOffline ? Colors.grey : (moodColors.gradientColors.firstOrNull ?? theme.colorScheme.primary)
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 12),
-                                    Text(
-                                      "Downloader & Sync",
-                                      style: TextStyle(
-                                        fontSize: 22, 
-                                        fontWeight: FontWeight.bold, 
-                                        color: _isOffline ? Colors.grey : null
-                                      ),
-                                    ),
-                                    const SizedBox(height: 6),
-                                    Text(
-                                      "Music downloader",
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(color: _isOffline ? Colors.grey : Colors.grey.shade400, fontSize: 13),
-                                    ),
-                                  ],
-                                ),
+                            Icon(_isOffline ? Icons.wifi_off : Icons.wifi, color: Colors.white, size: 20),
+                            const SizedBox(width: 12),
+                            Flexible(
+                              child: Text(
+                                _isOffline
+                                    ? "MOD OFFLINE - Player-ul Local este disponibil"
+                                    : "CONECTAT - Downloader & Player activated",
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
                               ),
                             ),
-                            if (_isOffline)
-                              Container(
-                                decoration: BoxDecoration(
-                                  color: Colors.black.withOpacity(0.8),
-                                  borderRadius: BorderRadius.circular(16),
-                                ),
-                                child: const Center(
-                                  child: Row(
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 32),
+
+                    // CARD 1: DOWNLOADER & SYNC
+                    Center(
+                      child: Container(
+                        constraints: const BoxConstraints(maxWidth: 800),
+                        child: Card(
+                          elevation: 4,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            side: BorderSide(
+                              color: _isOffline ? Colors.grey : moodColors.gradientColors.first, 
+                              width: 2,
+                            ),
+                          ),
+                          child: Stack(
+                            children: [
+                              InkWell(
+                                onTap: _isOffline
+                                    ? null
+                                    : () async {
+                                        await Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (context) => const MusicSyncHomePage(),
+                                          ),
+                                        );
+                                        _loadUserEmail();
+                                      },
+                                borderRadius: BorderRadius.circular(16),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 28.0, horizontal: 16.0),
+                                  child: Column(
                                     mainAxisSize: MainAxisSize.min,
-                                    crossAxisAlignment: CrossAxisAlignment.center,
                                     children: [
-                                      Icon(Icons.block, color: Colors.redAccent, size: 28),
-                                      SizedBox(width: 10),
+                                      Icon(
+                                        Icons.cloud_download, 
+                                        size: 54, 
+                                        color: _isOffline ? Colors.grey : moodColors.gradientColors.first
+                                      ),
+                                      const SizedBox(height: 12),
                                       Text(
-                                        "Indisponibil Offline",
-                                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                                        "Downloader & Sync",
+                                        style: TextStyle(
+                                          fontSize: 20, 
+                                          fontWeight: FontWeight.bold, 
+                                          color: _isOffline ? Colors.grey : null
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        "Music downloader",
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(color: _isOffline ? Colors.grey : Colors.grey.shade400, fontSize: 13),
                                       ),
                                     ],
                                   ),
                                 ),
                               ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 24),
-
-                  // CARD 2: LIBRARY & MUSIC PLAYER
-                  Center(
-                    child: Container(
-                      constraints: const BoxConstraints(maxWidth: 800, maxHeight: 180),
-                      child: Card(
-                        elevation: 4,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          side: BorderSide(
-                            color: moodColors.gradientColors.lastOrNull ?? theme.colorScheme.secondary, 
-                            width: 2,
-                          ),
-                        ),
-                        child: InkWell(
-                          onTap: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const LocalLibraryScreen(),
-                              ),
-                            );
-                          },
-                          borderRadius: BorderRadius.circular(16),
-                          child: Padding(
-                            padding: const EdgeInsets.all(24.0),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                SizedBox(
-                                  height: 54,
-                                  child: Center(
-                                    child: Icon(
-                                      Icons.library_music, 
-                                      size: 54, 
-                                      color: moodColors.gradientColors.lastOrNull ?? theme.colorScheme.secondary
+                              if (_isOffline)
+                                Positioned.fill(
+                                  child: Container(
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withOpacity(0.8),
+                                      borderRadius: BorderRadius.circular(16),
+                                    ),
+                                    child: const Center(
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(Icons.block, color: Colors.redAccent, size: 28),
+                                          SizedBox(width: 10),
+                                          Text(
+                                            "Indisponibil Offline",
+                                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 ),
-                                const SizedBox(height: 12),
-                                const Text("Library & Music Player", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                                const SizedBox(height: 6),
-                                Text(
-                                  "Listen music",
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 24),
+
+                    // CARD 2: LIBRARY & MUSIC PLAYER
+                    Center(
+                      child: Container(
+                        constraints: const BoxConstraints(maxWidth: 800),
+                        child: Card(
+                          elevation: 4,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            side: BorderSide(
+                              color: moodColors.gradientColors.last, 
+                              width: 2,
+                            ),
+                          ),
+                          child: InkWell(
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => const LocalLibraryScreen(),
                                 ),
-                              ],
+                              );
+                            },
+                            borderRadius: BorderRadius.circular(16),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 28.0, horizontal: 16.0),
+                              child: Column(
+                                children: [
+                                  Icon(
+                                    Icons.library_music, 
+                                    size: 54, 
+                                    color: moodColors.gradientColors.last
+                                  ),
+                                  const SizedBox(height: 12),
+                                  const Text("Library & Music Player", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    "Listen music",
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
-          const PersistentBottomMiniPlayer(),
-        ],
+            const PersistentBottomMiniPlayer(),
+          ],
+        ),
       ),
     );
   }
 }
 
 // ==========================================
-// PERSISTENT MINI PLAYER WITH CLICK-TO-OPEN
+// PERSISTENT MINI PLAYER
 // ==========================================
 class PersistentBottomMiniPlayer extends StatelessWidget {
   const PersistentBottomMiniPlayer({super.key});
 
   @override
   Widget build(BuildContext context) {
-    // These must be fetched here in build(), not inside AnimatedBuilder,
-    // because StatelessWidget has no state and no field to store them.
     final audioState = Provider.of<GlobalAudioState>(context);
     final theme = Theme.of(context);
 
@@ -972,13 +795,14 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
     final audioState = Provider.of<GlobalAudioState>(context);
     final themeProvider = Provider.of<ThemeProvider>(context);
     final currentCountryTheme = themeProvider.currentTheme;
-    final moodColors = (currentCountryTheme != null && currentCountryTheme.playerMoods[audioState.currentMood] != null)
-    ? currentCountryTheme.playerMoods[audioState.currentMood]!
-    : PlayerColors(
-        gradientColors: [theme.colorScheme.primary, theme.colorScheme.secondary],
-        textColor: theme.colorScheme.onPrimary,
-        accentColor: theme.colorScheme.secondary,
-      );
+
+    final moodColors = (currentCountryTheme.playerMoods != null && currentCountryTheme.playerMoods[audioState.currentMood] != null)
+        ? currentCountryTheme.playerMoods[audioState.currentMood]!
+        : PlayerColors(
+            gradientColors: [theme.colorScheme.primary, theme.colorScheme.secondary],
+            textColor: theme.colorScheme.onPrimary,
+            accentColor: theme.colorScheme.secondary,
+          );
 
     return Scaffold(
       appBar: AppBar(
@@ -1052,10 +876,10 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
                                     height: 50,
                                     decoration: BoxDecoration(
                                       gradient: LinearGradient(
-                                      colors: moodColors.gradientColors, 
-                                      begin: Alignment.topLeft, 
-                                      end: Alignment.bottomRight
-                                    ),
+                                        colors: moodColors.gradientColors, 
+                                        begin: Alignment.topLeft, 
+                                        end: Alignment.bottomRight
+                                      ),
                                       borderRadius: BorderRadius.circular(8),
                                     ),
                                     child: Icon(Icons.album, color: theme.colorScheme.primary, size: 30),
@@ -1108,7 +932,6 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
   final audioState = GlobalAudioState.instance;
   SongSortOrder _sortOrder = SongSortOrder.oldestFirst;
   
-  // ADAUGAT: Liste pentru filtrarea la căutare
   List<File> _allFiles = [];
   List<File> _displayedFiles = [];
   final TextEditingController _searchController = TextEditingController();
@@ -1127,7 +950,6 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
     super.dispose();
   }
 
-  // ADAUGAT: Logică combinată de sortare și filtrare text
   void _applySortingAndFiltering({bool shouldLoadPlaylist = false}) {
     List<File> filtered = _allFiles.where((file) {
       final fileName = file.path.split(Platform.pathSeparator).last.toLowerCase();
@@ -1215,7 +1037,6 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
         builder: (context, child) {
           return Column(
             children: [
-              // ADAUGAT: Caseta de căutare intuitivă
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
                 child: TextField(

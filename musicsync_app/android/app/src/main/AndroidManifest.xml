@@ -15,7 +15,7 @@
     <application
         android:label="musicsync_app"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@mipmap/launcher_icon"
         android:usesCleartextTraffic="true"> 
         <receiver
             android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver"
