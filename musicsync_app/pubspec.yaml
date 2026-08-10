@@ -47,6 +47,8 @@ flutter_launcher_icons:
 
 flutter:
   uses-material-design: true
+  assets: 
+    - assets/yugoslavia.jpg
 
 msix_config:
   display_name: MusicSync

@@ -121,6 +121,9 @@ void main() async {
     androidNotificationChannelName: 'MusicSync Player',
     androidNotificationOngoing: true,
     androidStopForegroundOnPause: true,
+    // AICI ADĂUGĂM BUTOANELE PENTRU NOTIFICARE:
+    androidNotificationIcon: 'mipmap/ic_launcher', // Iconița superbă pe care ai făcut-o
+    //NotificationColor: const Color(0xFFC8102E), // Roșul aprins din steaua Yugoslaviei
   );
 
   try {
@@ -204,24 +207,31 @@ class GlobalAudioState extends ChangeNotifier {
   Future<void> playSongAtIndex(int index) async {
     if (index < 0 || index >= playlistFiles.length) return;
     currentIndex = index;
-    final file = playlistFiles[currentIndex];
+    
+    // 1. Creăm lista de surse audio pentru TOT playlist-ul
+    final audioSources = playlistFiles.map((file) {
+      final fileName = file.path.split(Platform.pathSeparator).last;
+      final meta = parseArtistAndTitle(fileName);
+      
+      return AudioSource.file(
+        file.path,
+        tag: MediaItem(
+          id: file.path,
+          title: meta.title,
+          artist: meta.artist,
+          album: currentPlaylistTitle ?? '',
+          // AICI FORȚĂM IMAGINEA STEAGULUI YUGOSLAVIEI PENTRU FUNDALUL NOTIFICĂRII
+          // Pune poza în assets/images/yugoslavia.png și declar-o în pubspec.yaml
+          artUri: Uri.parse('asset:///assets/yugoslavia.webp'),
+        ),
+      );
+    }).toList();
 
-    final fileName = file.path.split(Platform.pathSeparator).last;
-    final meta = parseArtistAndTitle(fileName);
-    currentSongTitle = meta.title;
-    currentArtist = meta.artist;
+    // 2. Le legăm într-o sursă concatenată (playlist nativ)
+    final playlistSource = ConcatenatingAudioSource(children: audioSources);
 
-    final source = AudioSource.file(
-      file.path,
-      tag: MediaItem(
-        id: file.path,
-        title: currentSongTitle,
-        artist: currentArtist,
-        album: currentPlaylistTitle ?? '',
-      ),
-    );
-
-    await audioPlayer.setAudioSource(source);
+    // 3. Încărcăm playlist-ul și sărim direct la piesa selectată
+    await audioPlayer.setAudioSource(playlistSource, initialIndex: index);
     await audioPlayer.play();
 
     notifyListeners();
