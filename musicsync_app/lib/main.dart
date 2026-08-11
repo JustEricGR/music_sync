@@ -187,9 +187,19 @@ class GlobalAudioState extends ChangeNotifier {
       notifyListeners();
     });
 
-    audioPlayer.playerStateStream.listen((state) {
-      if (state.processingState == ProcessingState.completed) {
-        playNext();
+    // KEY FIX: update currentSongTitle/currentArtist/currentIndex whenever
+    // just_audio advances to the next track inside ConcatenatingAudioSource.
+    // Without this, the UI always shows the title of the first track only.
+    audioPlayer.sequenceStateStream.listen((seqState) {
+      if (seqState == null) return;
+      currentIndex = seqState.currentIndex;
+      if (currentIndex >= 0 && currentIndex < playlistFiles.length) {
+        final file = playlistFiles[currentIndex];
+        final fileName = file.path.split(Platform.pathSeparator).last;
+        final meta = parseArtistAndTitle(fileName);
+        currentSongTitle = meta.title;
+        currentArtist = meta.artist;
+        notifyListeners();
       }
     });
   }
@@ -340,58 +350,90 @@ class _MainHubScreenState extends State<MainHubScreen> {
   void _showThemePicker() {
     final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
 
-    showDialog(
+    final themes = [
+      ('grecia',      'Grecia',      '🇬🇷', const Color(0xFF1A5FA8), const Color(0xFF1A2A3A), ['https://images.unsplash.com/photo-1533105079780-92b9be482077?w=400','https://images.unsplash.com/photo-1570077188670-e3a8d69ac5ff?w=400','https://images.unsplash.com/photo-1516483638261-f4dbaf036963?w=400']),
+      ('armenia',     'Armenia',     '🇦🇲', const Color(0xFFC8241A), const Color(0xFF1A100A), ['https://images.unsplash.com/photo-1569233950985-9e3f9c7f8e5e?w=400','https://images.unsplash.com/photo-1605462863863-10d9e47e15ee?w=400','https://images.unsplash.com/photo-1589308078055-ec64dc9da8b5?w=400']),
+      ('iran',        'Iran',        '🇮🇷', const Color(0xFFD4890A), const Color(0xFF1A0F00), ['https://images.unsplash.com/photo-1590341328520-63256eb32f88?w=400','https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=400','https://images.unsplash.com/photo-1526392060635-9d6019884377?w=400']),
+      ('turcia',      'Turcia',      '🇹🇷', const Color(0xFF1B6CA8), const Color(0xFF1C1208), ['https://images.unsplash.com/photo-1541432901042-2d8bd64b4a9b?w=400','https://images.unsplash.com/photo-1524231757912-21f4fe3a7200?w=400','https://images.unsplash.com/photo-1565073182887-6bcefbe225b1?w=400']),
+      ('azerbaidjan', 'Azerbaidjan', '🇦🇿', const Color(0xFF00B9E4), const Color(0xFF180A10), ['https://images.unsplash.com/photo-1558618047-3c8c76ca7d13?w=400','https://images.unsplash.com/photo-1571068316344-75bc76f77890?w=400','https://images.unsplash.com/photo-1570197571499-9c7fefb6b5e5?w=400']),
+    ];
+
+    showModalBottomSheet(
       context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Selectează Tema'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ListTile(
-                  leading: const Icon(Icons.location_city, color: Colors.blue),
-                  title: const Text('Grecia Aesthetic'),
-                  onTap: () {
-                    themeProvider.switchTheme('grecia');
-                    Navigator.pop(context);
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.terrain, color: Colors.deepOrange),
-                  title: const Text('Turkic Aesthetic'),
-                  onTap: () {
-                    themeProvider.switchTheme('turcia');
-                    Navigator.pop(context);
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.terrain, color: Colors.deepOrange),
-                  title: const Text('Iran Aesthetic'),
-                  onTap: () {
-                    themeProvider.switchTheme('iran');
-                    Navigator.pop(context);
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.terrain, color: Colors.deepOrange),
-                  title: const Text('Armenia'),
-                  onTap: () {
-                    themeProvider.switchTheme('armenia');
-                    Navigator.pop(context);
-                  },
-                ),
-                ListTile(
-                  leading: const Icon(Icons.terrain, color: Colors.deepOrange),
-                  title: const Text('Azerbaijan Aesthetic'),
-                  onTap: () {
-                    themeProvider.switchTheme('azerbaijan');
-                    Navigator.pop(context);
-                  },
-                ),
-              ],
-            ),
-          ),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.75,
+          minChildSize: 0.4,
+          maxChildSize: 0.95,
+          builder: (_, controller) {
+            return Container(
+              decoration: const BoxDecoration(
+                color: Color(0xFF0A0A0A),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+              ),
+              child: Column(
+                children: [
+                  const SizedBox(height: 8),
+                  Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
+                  const SizedBox(height: 16),
+                  const Text('Alege Tema', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 16),
+                  Expanded(
+                    child: ListView.builder(
+                      controller: controller,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      itemCount: themes.length,
+                      itemBuilder: (context, i) {
+                        final t = themes[i];
+                        final id = t.$1; final name = t.$2; final emoji = t.$3;
+                        final accent = t.$4; final bg = t.$5; final urls = t.$6;
+                        final isSelected = themeProvider.currentTheme.id == id;
+                        return GestureDetector(
+                          onTap: () { themeProvider.switchTheme(id); Navigator.pop(ctx); },
+                          child: Container(
+                            margin: const EdgeInsets.only(bottom: 12),
+                            height: 110,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(18),
+                              border: Border.all(color: isSelected ? accent : Colors.white12, width: isSelected ? 2.5 : 1),
+                              boxShadow: isSelected ? [BoxShadow(color: accent.withOpacity(0.5), blurRadius: 16, spreadRadius: 2)] : [],
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(17),
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  Row(children: urls.map((url) => Expanded(child: Image.network(url, fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: bg)))).toList()),
+                                  Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.centerLeft, end: Alignment.centerRight, colors: [bg.withOpacity(0.92), bg.withOpacity(0.55), Colors.transparent]))),
+                                  Padding(
+                                    padding: const EdgeInsets.all(16),
+                                    child: Row(
+                                      children: [
+                                        Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
+                                          Text(emoji, style: const TextStyle(fontSize: 28)),
+                                          const SizedBox(height: 4),
+                                          Text(name, style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, shadows: [Shadow(color: Colors.black, blurRadius: 8)])),
+                                        ]),
+                                        const Spacer(),
+                                        if (isSelected) Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: BoxDecoration(color: accent, borderRadius: BorderRadius.circular(20)), child: const Text('Activ', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+              ),
+            );
+          },
         );
       },
     );
@@ -512,7 +554,7 @@ class _MainHubScreenState extends State<MainHubScreen> {
                                       },
                                 borderRadius: BorderRadius.circular(16),
                                 child: Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 28.0, horizontal: 16.0),
+                                  padding: const EdgeInsets.symmetric(vertical: 20.0, horizontal: 16.0),
                                   child: Column(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
@@ -594,7 +636,7 @@ class _MainHubScreenState extends State<MainHubScreen> {
                             },
                             borderRadius: BorderRadius.circular(16),
                             child: Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 28.0, horizontal: 16.0),
+                              padding: const EdgeInsets.symmetric(vertical: 20.0, horizontal: 16.0),
                               child: Column(
                                 children: [
                                   Icon(
@@ -1016,6 +1058,144 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
     return Color.lerp(baseDark, baseLight, ratio)!;
   }
 
+  /// Animated now-playing card with country photo background.
+  Widget _buildNowPlayingCard(BuildContext context, GlobalAudioState audioState, ThemeData theme) {
+    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+    final countryTheme = themeProvider.currentTheme;
+
+    // Map theme id to Unsplash photo URLs (3 per country)
+    final Map<String, List<String>> countryPhotos = {
+      'grecia': [
+        'https://images.unsplash.com/photo-1533105079780-92b9be482077?w=600',
+        'https://images.unsplash.com/photo-1570077188670-e3a8d69ac5ff?w=600',
+        'https://images.unsplash.com/photo-1516483638261-f4dbaf036963?w=600',
+      ],
+      'armenia': [
+        'https://images.unsplash.com/photo-1569233950985-9e3f9c7f8e5e?w=600',
+        'https://images.unsplash.com/photo-1605462863863-10d9e47e15ee?w=600',
+        'https://images.unsplash.com/photo-1589308078055-ec64dc9da8b5?w=600',
+      ],
+      'iran': [
+        'https://images.unsplash.com/photo-1590341328520-63256eb32f88?w=600',
+        'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=600',
+        'https://images.unsplash.com/photo-1526392060635-9d6019884377?w=600',
+      ],
+      'turcia': [
+        'https://images.unsplash.com/photo-1541432901042-2d8bd64b4a9b?w=600',
+        'https://images.unsplash.com/photo-1524231757912-21f4fe3a7200?w=600',
+        'https://images.unsplash.com/photo-1565073182887-6bcefbe225b1?w=600',
+      ],
+      'azerbaidjan': [
+        'https://images.unsplash.com/photo-1558618047-3c8c76ca7d13?w=600',
+        'https://images.unsplash.com/photo-1571068316344-75bc76f77890?w=600',
+        'https://images.unsplash.com/photo-1570197571499-9c7fefb6b5e5?w=600',
+      ],
+    };
+
+    final urls = countryPhotos[countryTheme.id] ?? [];
+    final mood = audioState.currentMood;
+    final moodColors = countryTheme.playerMoods[mood] ??
+        PlayerColors(
+          gradientColors: [theme.colorScheme.primary, theme.colorScheme.secondary],
+          textColor: Colors.white,
+          accentColor: theme.colorScheme.primary,
+        );
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 600),
+      curve: Curves.easeInOut,
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      height: 140,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: moodColors.accentColor.withOpacity(0.6), width: 1.5),
+        boxShadow: [BoxShadow(color: moodColors.accentColor.withOpacity(0.25), blurRadius: 20, offset: const Offset(0, 6))],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(19),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // Country photo collage background
+            if (urls.isNotEmpty)
+              Row(
+                children: urls.map((url) => Expanded(
+                  child: Image.network(url, fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Container(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(colors: moodColors.gradientColors),
+                      ),
+                    ),
+                  ),
+                )).toList(),
+              )
+            else
+              Container(decoration: BoxDecoration(gradient: LinearGradient(colors: moodColors.gradientColors))),
+
+            // Mood gradient overlay
+            Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: [
+                    moodColors.gradientColors.first.withOpacity(0.88),
+                    moodColors.gradientColors.first.withOpacity(0.65),
+                    moodColors.gradientColors.last.withOpacity(0.40),
+                  ],
+                ),
+              ),
+            ),
+
+            // Song info
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.graphic_eq, color: moodColors.accentColor, size: 18),
+                      const SizedBox(width: 6),
+                      Text(
+                        'În redare',
+                        style: TextStyle(color: moodColors.accentColor, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.2),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    audioState.currentSongTitle.isNotEmpty ? audioState.currentSongTitle : 'Selectează o melodie',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: moodColors.textColor,
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                      shadows: const [Shadow(color: Colors.black54, blurRadius: 6)],
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    audioState.currentArtist.isNotEmpty ? audioState.currentArtist : '',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: moodColors.textColor.withOpacity(0.75),
+                      fontSize: 13,
+                      shadows: const [Shadow(color: Colors.black54, blurRadius: 4)],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1076,36 +1256,7 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
                 ),
               ),
 
-              Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    Container(
-                      width: 60,
-                      height: 60,
-                      decoration: BoxDecoration(
-                        color: theme.colorScheme.primary.withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: theme.colorScheme.primary, width: 2),
-                      ),
-                      child: Icon(Icons.music_note, size: 32, color: theme.colorScheme.primary),
-                    ),
-                    const SizedBox(height: 10),
-                    Text(
-                      audioState.currentSongTitle.isNotEmpty ? audioState.currentSongTitle : "Nicio piesă",
-                      textAlign: TextAlign.center,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      audioState.currentArtist.isNotEmpty ? audioState.currentArtist : "Artist Necunoscut",
-                      style: TextStyle(color: theme.colorScheme.secondary, fontSize: 13, fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
-              ),
+              _buildNowPlayingCard(context, audioState, theme),
 
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 20),
