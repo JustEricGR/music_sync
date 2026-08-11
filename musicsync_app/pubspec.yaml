@@ -49,6 +49,14 @@ flutter:
   uses-material-design: true
   assets: 
     - assets/yugoslavia.jpg
+    - assets/images/armenia/
+    - assets/images/azerbaijan/
+    - assets/images/bosnia/
+    - assets/images/central_asia/
+    - assets/images/greece/
+    - assets/images/iran/
+    - assets/images/kurdistan/
+    - assets/images/turkey/
 
 msix_config:
   display_name: MusicSync

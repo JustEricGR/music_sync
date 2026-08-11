@@ -14,14 +14,14 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:provider/provider.dart';
 
-// Importurile tale de teme
+// Importurile tale de teme și widget-uri
 import 'themes/theme_provider.dart';
 import 'themes/app_themes.dart';
 import 'widgets/dynamic_player.dart';
 import 'download_service.dart';
 
 // ==========================================
-// ENUM MOOD FIX
+// ENUMERATIONS
 // ==========================================
 enum SongMood {
   chill,
@@ -34,7 +34,7 @@ enum SongMood {
 enum SongSortOrder { oldestFirst, newestFirst }
 
 // ==========================================
-// UTILITY: EXTRAGERE ARTIST & TITLU
+// METADATA PARSER
 // ==========================================
 class SongMetadata {
   final String artist;
@@ -63,6 +63,23 @@ SongMetadata parseArtistAndTitle(String rawName) {
     artist: 'Artist Necunoscut',
     title: cleanName,
   );
+}
+
+// ==========================================
+// LOCAL LIBRARY DATA MODEL
+// ==========================================
+class LocalPlaylistModel {
+  final String title;
+  final Directory directory;
+  final List<File> audioFiles;
+  final int? totalYoutubeCount;
+
+  LocalPlaylistModel({
+    required this.title,
+    required this.directory,
+    required this.audioFiles,
+    this.totalYoutubeCount,
+  });
 }
 
 // ==========================================
@@ -113,41 +130,8 @@ class GoogleAuthManager {
   }
 }
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  await JustAudioBackground.init(
-    androidNotificationChannelId: 'com.example.musicsync_app.audio',
-    androidNotificationChannelName: 'MusicSync Player',
-    androidNotificationOngoing: true,
-    androidStopForegroundOnPause: true,
-    // AICI ADĂUGĂM BUTOANELE PENTRU NOTIFICARE:
-    androidNotificationIcon: 'mipmap/ic_launcher', // Iconița superbă pe care ai făcut-o
-    //NotificationColor: const Color(0xFFC8102E), // Roșul aprins din steaua Yugoslaviei
-  );
-
-  try {
-    final session = await AudioSession.instance;
-    await session.configure(const AudioSessionConfiguration.music());
-  } catch (e) {
-    debugPrint('[AudioSession] configure failed: $e');
-  }
-
-  await DownloadNotificationManager.init();
-
-  runApp(
-    MultiProvider(
-      providers: [
-        ChangeNotifierProvider(create: (_) => ThemeProvider()),
-        ChangeNotifierProvider(create: (_) => GlobalAudioState.instance),
-      ],
-      child: const MusicSyncApp(),
-    ),
-  );
-}
-
 // ==========================================
-// GLOBAL AUDIO PLAYER STATE
+// GLOBAL AUDIO PLAYER STATE (PROVIDER)
 // ==========================================
 class GlobalAudioState extends ChangeNotifier {
   static final GlobalAudioState instance = GlobalAudioState._internal();
@@ -187,9 +171,6 @@ class GlobalAudioState extends ChangeNotifier {
       notifyListeners();
     });
 
-    // KEY FIX: update currentSongTitle/currentArtist/currentIndex whenever
-    // just_audio advances to the next track inside ConcatenatingAudioSource.
-    // Without this, the UI always shows the title of the first track only.
     audioPlayer.sequenceStateStream.listen((seqState) {
       if (seqState == null) return;
       currentIndex = seqState.currentIndex;
@@ -218,7 +199,6 @@ class GlobalAudioState extends ChangeNotifier {
     if (index < 0 || index >= playlistFiles.length) return;
     currentIndex = index;
     
-    // 1. Creăm lista de surse audio pentru TOT playlist-ul
     final audioSources = playlistFiles.map((file) {
       final fileName = file.path.split(Platform.pathSeparator).last;
       final meta = parseArtistAndTitle(fileName);
@@ -230,20 +210,15 @@ class GlobalAudioState extends ChangeNotifier {
           title: meta.title,
           artist: meta.artist,
           album: currentPlaylistTitle ?? '',
-          // AICI FORȚĂM IMAGINEA STEAGULUI YUGOSLAVIEI PENTRU FUNDALUL NOTIFICĂRII
-          // Pune poza în assets/images/yugoslavia.png și declar-o în pubspec.yaml
-          artUri: Uri.parse('asset:///assets/yugoslavia.webp'),
+          artUri: Uri.parse('asset:///assets/yugoslavia.jpg'),
         ),
       );
     }).toList();
 
-    // 2. Le legăm într-o sursă concatenată (playlist nativ)
     final playlistSource = ConcatenatingAudioSource(children: audioSources);
 
-    // 3. Încărcăm playlist-ul și sărim direct la piesa selectată
     await audioPlayer.setAudioSource(playlistSource, initialIndex: index);
     await audioPlayer.play();
-
     notifyListeners();
   }
 
@@ -280,8 +255,39 @@ class GlobalAudioState extends ChangeNotifier {
 }
 
 // ==========================================
-// APP INITIALIZATION
+// APPLICATION MAIN ENTRY POINT
 // ==========================================
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await JustAudioBackground.init(
+    androidNotificationChannelId: 'com.example.musicsync_app.audio',
+    androidNotificationChannelName: 'MusicSync Player',
+    androidNotificationOngoing: true,
+    androidStopForegroundOnPause: true,
+    androidNotificationIcon: 'mipmap/ic_launcher',
+  );
+
+  try {
+    final session = await AudioSession.instance;
+    await session.configure(const AudioSessionConfiguration.music());
+  } catch (e) {
+    debugPrint('[AudioSession] configure failed: $e');
+  }
+
+  await DownloadNotificationManager.init();
+
+  runApp(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => ThemeProvider()),
+        ChangeNotifierProvider(create: (_) => GlobalAudioState.instance),
+      ],
+      child: const MusicSyncApp(),
+    ),
+  );
+}
+
 class MusicSyncApp extends StatelessWidget {
   const MusicSyncApp({super.key});
 
@@ -348,21 +354,65 @@ class _MainHubScreenState extends State<MainHubScreen> {
   }
 
   void _showThemePicker() {
-    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
-
-    final themes = [
-      ('grecia',      'Grecia',      '🇬🇷', const Color(0xFF1A5FA8), const Color(0xFF1A2A3A), ['https://images.unsplash.com/photo-1533105079780-92b9be482077?w=400','https://images.unsplash.com/photo-1570077188670-e3a8d69ac5ff?w=400','https://images.unsplash.com/photo-1516483638261-f4dbaf036963?w=400']),
-      ('armenia',     'Armenia',     '🇦🇲', const Color(0xFFC8241A), const Color(0xFF1A100A), ['https://images.unsplash.com/photo-1569233950985-9e3f9c7f8e5e?w=400','https://images.unsplash.com/photo-1605462863863-10d9e47e15ee?w=400','https://images.unsplash.com/photo-1589308078055-ec64dc9da8b5?w=400']),
-      ('iran',        'Iran',        '🇮🇷', const Color(0xFFD4890A), const Color(0xFF1A0F00), ['https://images.unsplash.com/photo-1590341328520-63256eb32f88?w=400','https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=400','https://images.unsplash.com/photo-1526392060635-9d6019884377?w=400']),
-      ('turcia',      'Turcia',      '🇹🇷', const Color(0xFF1B6CA8), const Color(0xFF1C1208), ['https://images.unsplash.com/photo-1541432901042-2d8bd64b4a9b?w=400','https://images.unsplash.com/photo-1524231757912-21f4fe3a7200?w=400','https://images.unsplash.com/photo-1565073182887-6bcefbe225b1?w=400']),
-      ('azerbaidjan', 'Azerbaidjan', '🇦🇿', const Color(0xFF00B9E4), const Color(0xFF180A10), ['https://images.unsplash.com/photo-1558618047-3c8c76ca7d13?w=400','https://images.unsplash.com/photo-1571068316344-75bc76f77890?w=400','https://images.unsplash.com/photo-1570197571499-9c7fefb6b5e5?w=400']),
-    ];
-
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
+        final themeProvider = Provider.of<ThemeProvider>(ctx, listen: false);
+
+        final themes = [
+          ('grecia', 'Grecia', '🇬🇷', const Color(0xFF1A5FA8), const Color(0xFFF4EED8), [
+            'assets/images/greece/greece1.jpg',
+            'assets/images/greece/greece2.jpg',
+            'assets/images/greece/greece3.jpg',
+            'assets/images/greece/greece4.jpg',
+            'assets/images/greece/greece5.jpg',
+            'assets/images/greece/greece6.jpg',
+            'assets/images/greece/greece7.jpg'
+          ]),
+          ('armenia', 'Armenia', '🇦🇲', const Color(0xFFC8241A), const Color(0xFF1A100A), [
+            'assets/images/armenia/armenia1.jpg',
+            'assets/images/armenia/armenia2.jpg',
+            'assets/images/armenia/armenia3.jpg',
+            'assets/images/armenia/armenia4.jpg',
+            'assets/images/armenia/armenia5.jpg'
+          ]),
+          ('iran', 'Iran', '🇮🇷', const Color(0xFFD4890A), const Color(0xFF1A0F00), [
+            'assets/images/iran/iran1.jpg',
+            'assets/images/iran/iran2.jpg',
+            'assets/images/iran/iran3.jpg',
+            'assets/images/iran/iran4.jpg',
+            'assets/images/iran/iran5.jpg',
+            'assets/images/iran/iran6.jpg',
+            'assets/images/iran/iran7.jpg',
+            'assets/images/iran/iran8.jpg'
+          ]),
+          ('turcia', 'Turcia', '🇹🇷', const Color(0xFF1B6CA8), const Color(0xFF1C1208), [
+            'assets/images/turkey/turkey1.jpg',
+            'assets/images/turkey/turkey2.jpg',
+            'assets/images/turkey/turkey3.jpg',
+            'assets/images/turkey/turkey4.jpg',
+            'assets/images/turkey/turkey5.jpg',
+            'assets/images/turkey/turkey6.jpg'
+          ]),
+          ('azerbaidjan', 'Azerbaidjan', '🇦🇿', const Color(0xFF00B9E4), const Color(0xFF180A10), [
+            'assets/images/azerbaijan/azerbaijan1.jpg'
+          ]),
+          ('kurdistan', 'Kurdistan', '☀️', const Color(0xFF00B9E4), const Color(0xFF180A10), [
+            'assets/images/kurdistan/kurdistan1.jpg',
+            'assets/images/kurdistan/kurdistan2.jpg',
+            'assets/images/kurdistan/kurdistan3.jpg',
+            'assets/images/kurdistan/kurdistan4.jpg'
+          ]),
+          ('bosnia', 'Bosnia', '🇧🇦', const Color(0xFF00B9E4), const Color(0xFF180A10), [
+            'assets/images/bosnia/bosnia1.jpg'
+          ]),
+          ('central asia', 'Central Asia', '🌍', const Color(0xFF00B9E4), const Color(0xFF180A10), [
+            'assets/images/central_asia/central_asia1.jpg'
+          ]),
+        ];
+
         return DraggableScrollableSheet(
           initialChildSize: 0.75,
           minChildSize: 0.4,
@@ -389,9 +439,14 @@ class _MainHubScreenState extends State<MainHubScreen> {
                         final t = themes[i];
                         final id = t.$1; final name = t.$2; final emoji = t.$3;
                         final accent = t.$4; final bg = t.$5; final urls = t.$6;
-                        final isSelected = themeProvider.currentTheme.id == id;
+                        
+                        final isSelected = Provider.of<ThemeProvider>(context).currentTheme.id == id;
+                        
                         return GestureDetector(
-                          onTap: () { themeProvider.switchTheme(id); Navigator.pop(ctx); },
+                          onTap: () { 
+                            themeProvider.switchTheme(id); 
+                            Navigator.pop(ctx); 
+                          },
                           child: Container(
                             margin: const EdgeInsets.only(bottom: 12),
                             height: 110,
@@ -405,7 +460,15 @@ class _MainHubScreenState extends State<MainHubScreen> {
                               child: Stack(
                                 fit: StackFit.expand,
                                 children: [
-                                  Row(children: urls.map((url) => Expanded(child: Image.network(url, fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: bg)))).toList()),
+                                  Row(
+                                    children: urls.map((url) => Expanded(
+                                      child: Image.asset(
+                                        url, 
+                                        fit: BoxFit.cover, 
+                                        errorBuilder: (_, __, ___) => Container(color: bg),
+                                      ),
+                                    )).toList(),
+                                  ),
                                   Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.centerLeft, end: Alignment.centerRight, colors: [bg.withOpacity(0.92), bg.withOpacity(0.55), Colors.transparent]))),
                                   Padding(
                                     padding: const EdgeInsets.all(16),
@@ -414,7 +477,7 @@ class _MainHubScreenState extends State<MainHubScreen> {
                                         Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
                                           Text(emoji, style: const TextStyle(fontSize: 28)),
                                           const SizedBox(height: 4),
-                                          Text(name, style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, shadows: [Shadow(color: Colors.black, blurRadius: 8)])),
+                                          Text(name, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold, shadows: [Shadow(color: Colors.black, blurRadius: 8)])),
                                         ]),
                                         const Spacer(),
                                         if (isSelected) Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: BoxDecoration(color: accent, borderRadius: BorderRadius.circular(20)), child: const Text('Activ', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
@@ -492,7 +555,6 @@ class _MainHubScreenState extends State<MainHubScreen> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    // STATUT CONEXIUNE
                     Center(
                       child: Container(
                         constraints: const BoxConstraints(maxWidth: 600),
@@ -609,7 +671,6 @@ class _MainHubScreenState extends State<MainHubScreen> {
                         ),
                       ),
                     ),
-
                     const SizedBox(height: 24),
 
                     // CARD 2: LIBRARY & MUSIC PLAYER
@@ -754,22 +815,8 @@ class PersistentBottomMiniPlayer extends StatelessWidget {
 }
 
 // ==========================================
-// LOCAL LIBRARY & PLAYER MODELS
+// LOCAL LIBRARY SCREEN
 // ==========================================
-class LocalPlaylistModel {
-  final String title;
-  final Directory directory;
-  final List<File> audioFiles;
-  final int? totalYoutubeCount;
-
-  LocalPlaylistModel({
-    required this.title,
-    required this.directory,
-    required this.audioFiles,
-    this.totalYoutubeCount,
-  });
-}
-
 class LocalLibraryScreen extends StatefulWidget {
   const LocalLibraryScreen({super.key});
 
@@ -969,7 +1016,7 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
 }
 
 // ==========================================
-// PLAYER SCREEN WITH SORTING, SEARCHING & COLORING
+// DETAILED PLAYLIST PLAYER SCREEN (FULLSCREEN BACKGROUND)
 // ==========================================
 class PlaylistPlayerScreen extends StatefulWidget {
   final LocalPlaylistModel playlist;
@@ -1043,180 +1090,100 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
   }
 
   Color _getSongAgeColor(BuildContext context, int index, int totalCount) {
-    if (totalCount <= 1) return Theme.of(context).cardColor;
+    if (totalCount <= 1) return Colors.transparent;
 
     double ratio = index / (totalCount - 1);
     if (_sortOrder == SongSortOrder.newestFirst) {
       ratio = 1.0 - ratio;
     }
 
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    
-    final baseDark = isDark ? const Color(0xFF16181D) : const Color(0xFFE2E4E9);
-    final baseLight = isDark ? const Color(0xFF2E3545) : const Color(0xFFFFFFFF);
-
-    return Color.lerp(baseDark, baseLight, ratio)!;
-  }
-
-  /// Animated now-playing card with country photo background.
-  Widget _buildNowPlayingCard(BuildContext context, GlobalAudioState audioState, ThemeData theme) {
-    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
-    final countryTheme = themeProvider.currentTheme;
-
-    // Map theme id to Unsplash photo URLs (3 per country)
-    final Map<String, List<String>> countryPhotos = {
-      'grecia': [
-        'https://images.unsplash.com/photo-1533105079780-92b9be482077?w=600',
-        'https://images.unsplash.com/photo-1570077188670-e3a8d69ac5ff?w=600',
-        'https://images.unsplash.com/photo-1516483638261-f4dbaf036963?w=600',
-      ],
-      'armenia': [
-        'https://images.unsplash.com/photo-1569233950985-9e3f9c7f8e5e?w=600',
-        'https://images.unsplash.com/photo-1605462863863-10d9e47e15ee?w=600',
-        'https://images.unsplash.com/photo-1589308078055-ec64dc9da8b5?w=600',
-      ],
-      'iran': [
-        'https://images.unsplash.com/photo-1590341328520-63256eb32f88?w=600',
-        'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=600',
-        'https://images.unsplash.com/photo-1526392060635-9d6019884377?w=600',
-      ],
-      'turcia': [
-        'https://images.unsplash.com/photo-1541432901042-2d8bd64b4a9b?w=600',
-        'https://images.unsplash.com/photo-1524231757912-21f4fe3a7200?w=600',
-        'https://images.unsplash.com/photo-1565073182887-6bcefbe225b1?w=600',
-      ],
-      'azerbaidjan': [
-        'https://images.unsplash.com/photo-1558618047-3c8c76ca7d13?w=600',
-        'https://images.unsplash.com/photo-1571068316344-75bc76f77890?w=600',
-        'https://images.unsplash.com/photo-1570197571499-9c7fefb6b5e5?w=600',
-      ],
-    };
-
-    final urls = countryPhotos[countryTheme.id] ?? [];
-    final mood = audioState.currentMood;
-    final moodColors = countryTheme.playerMoods[mood] ??
-        PlayerColors(
-          gradientColors: [theme.colorScheme.primary, theme.colorScheme.secondary],
-          textColor: Colors.white,
-          accentColor: theme.colorScheme.primary,
-        );
-
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 600),
-      curve: Curves.easeInOut,
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      height: 140,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: moodColors.accentColor.withOpacity(0.6), width: 1.5),
-        boxShadow: [BoxShadow(color: moodColors.accentColor.withOpacity(0.25), blurRadius: 20, offset: const Offset(0, 6))],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(19),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            // Country photo collage background
-            if (urls.isNotEmpty)
-              Row(
-                children: urls.map((url) => Expanded(
-                  child: Image.network(url, fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => Container(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(colors: moodColors.gradientColors),
-                      ),
-                    ),
-                  ),
-                )).toList(),
-              )
-            else
-              Container(decoration: BoxDecoration(gradient: LinearGradient(colors: moodColors.gradientColors))),
-
-            // Mood gradient overlay
-            Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.centerLeft,
-                  end: Alignment.centerRight,
-                  colors: [
-                    moodColors.gradientColors.first.withOpacity(0.88),
-                    moodColors.gradientColors.first.withOpacity(0.65),
-                    moodColors.gradientColors.last.withOpacity(0.40),
-                  ],
-                ),
-              ),
-            ),
-
-            // Song info
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.graphic_eq, color: moodColors.accentColor, size: 18),
-                      const SizedBox(width: 6),
-                      Text(
-                        'În redare',
-                        style: TextStyle(color: moodColors.accentColor, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.2),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    audioState.currentSongTitle.isNotEmpty ? audioState.currentSongTitle : 'Selectează o melodie',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: moodColors.textColor,
-                      fontSize: 17,
-                      fontWeight: FontWeight.bold,
-                      shadows: const [Shadow(color: Colors.black54, blurRadius: 6)],
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    audioState.currentArtist.isNotEmpty ? audioState.currentArtist : '',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: moodColors.textColor.withOpacity(0.75),
-                      fontSize: 13,
-                      shadows: const [Shadow(color: Colors.black54, blurRadius: 4)],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+    // Folosim culori foarte transparente pentru rânduri ca să se vadă fundalul din spate
+    return Colors.black.withOpacity(0.05 + (ratio * 0.1));
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final themeProvider = Provider.of<ThemeProvider>(context);
+    final countryTheme = themeProvider.currentTheme;
+
+    // Map-ul tău complet cu pozele locale din assets
+    final Map<String, List<String>> countryPhotos = {
+      'grecia': [
+        'assets/images/greece/greece1.jpg',
+        'assets/images/greece/greece2.jpg',
+        'assets/images/greece/greece3.jpg',
+        'assets/images/greece/greece4.jpg',
+        'assets/images/greece/greece5.jpg',
+        'assets/images/greece/greece6.jpg',
+        'assets/images/greece/greece7.jpg'
+      ],
+      'armenia': [
+        'assets/images/armenia/armenia1.jpg',
+        'assets/images/armenia/armenia2.jpg',
+        'assets/images/armenia/armenia3.jpg',
+        'assets/images/armenia/armenia4.jpg',
+        'assets/images/armenia/armenia5.jpg'
+      ],
+      'iran': [
+        'assets/images/iran/iran1.jpg',
+        'assets/images/iran/iran2.jpg',
+        'assets/images/iran/iran3.jpg',
+        'assets/images/iran/iran4.jpg',
+        'assets/images/iran/iran5.jpg',
+        'assets/images/iran/iran6.jpg',
+        'assets/images/iran/iran7.jpg',
+        'assets/images/iran/iran8.jpg'
+      ],
+      'turcia': [
+        'assets/images/turkey/turkey1.jpg',
+        'assets/images/turkey/turkey2.jpg',
+        'assets/images/turkey/turkey3.jpg',
+        'assets/images/turkey/turkey4.jpg',
+        'assets/images/turkey/turkey5.jpg',
+        'assets/images/turkey/turkey6.jpg'
+      ],
+      'azerbaidjan': [
+        'assets/images/azerbaijan/azerbaijan1.jpg'
+      ],
+      'kurdistan': [
+        'assets/images/kurdistan/kurdistan1.jpg',
+        'assets/images/kurdistan/kurdistan2.jpg',
+        'assets/images/kurdistan/kurdistan3.jpg',
+        'assets/images/kurdistan/kurdistan4.jpg'
+      ],
+      'bosnia': [
+        'assets/images/bosnia/bosnia1.jpg'
+      ],
+      'central asia': [
+        'assets/images/central_asia/central_asia1.jpg'
+      ],
+    };
+
+    final urls = countryPhotos[countryTheme.id] ?? [];
 
     return Scaffold(
+      backgroundColor: countryTheme.scaffoldBackground,
+      // Folosim extendBodyBehindAppBar pentru ca fundalul să urce și sub bara de sus
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(widget.playlist.title, style: const TextStyle(fontSize: 16)),
+            Text(widget.playlist.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white, shadows: [Shadow(color: Colors.black, blurRadius: 4)])),
             Text(
               widget.playlist.totalYoutubeCount != null
                   ? "${_allFiles.length} din ${widget.playlist.totalYoutubeCount} piese salvate"
                   : "${_allFiles.length} piese locale",
-              style: const TextStyle(fontSize: 11, color: Colors.white70),
+              style: const TextStyle(fontSize: 11, color: Colors.white70, shadows: [Shadow(color: Colors.black, blurRadius: 4)]),
             ),
           ],
         ),
         actions: [
           IconButton(
-            icon: Icon(_sortOrder == SongSortOrder.oldestFirst ? Icons.sort_by_alpha : Icons.swap_vert),
+            icon: Icon(_sortOrder == SongSortOrder.oldestFirst ? Icons.sort_by_alpha : Icons.swap_vert, color: Colors.white),
             tooltip: _sortOrder == SongSortOrder.oldestFirst ? "Sortează: Cele mai Noi Primele" : "Sortează: Cele mai Vechi Primele",
             onPressed: _toggleSortOrder,
           ),
@@ -1225,137 +1192,238 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
       body: AnimatedBuilder(
         animation: audioState,
         builder: (context, child) {
-          return Column(
+          final mood = audioState.currentMood;
+          final moodColors = countryTheme.playerMoods[mood] ??
+              PlayerColors(
+                gradientColors: [theme.colorScheme.primary, theme.colorScheme.secondary],
+                textColor: Colors.white,
+                accentColor: theme.colorScheme.primary,
+              );
+
+          return Stack(
             children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-                child: TextField(
-                  controller: _searchController,
-                  onChanged: (value) {
-                    _searchQuery = value;
-                    _applySortingAndFiltering();
-                  },
-                  decoration: InputDecoration(
-                    hintText: "Caută o melodie în playlist...",
-                    prefixIcon: const Icon(Icons.search),
-                    suffixIcon: _searchQuery.isNotEmpty 
-                        ? IconButton(
-                            icon: const Icon(Icons.clear),
-                            onPressed: () {
-                              _searchController.clear();
-                              _searchQuery = "";
-                              _applySortingAndFiltering();
-                            },
-                          )
-                        : null,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
+              // 1. IMAGINILE PE TOT ECRANUL (FUNDALUL)
+              Positioned.fill(
+                child: urls.isNotEmpty
+                    ? Row(
+                        children: urls.map((url) => Expanded(
+                          child: Image.asset(
+                            url, 
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => Container(color: countryTheme.scaffoldBackground),
+                          ),
+                        )).toList(),
+                      )
+                    : Container(color: countryTheme.scaffoldBackground),
+              ),
+
+              // 2. FILTRU DE INTUNECARE ȘI GRADIENT PENTRU CITIBILITATE TEXT
+              Positioned.fill(
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.black.withOpacity(0.5), // Sus, sub AppBar
+                        moodColors.gradientColors.first.withOpacity(0.75), // La mijloc împrumută culoarea temei
+                        Colors.black.withOpacity(0.92), // Jos, unde e textul și butoanele mari
+                      ],
                     ),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
                   ),
                 ),
               ),
 
-              _buildNowPlayingCard(context, audioState, theme),
-
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
+              // 3. INTERFAȚA ȘI CONTROALELE (STRATUL DIN FAȚĂ)
+              SafeArea(
                 child: Column(
                   children: [
-                    Slider(
-                      value: audioState.position.inSeconds.toDouble().clamp(0.0, audioState.duration.inSeconds.toDouble()),
-                      max: audioState.duration.inSeconds > 0 ? audioState.duration.inSeconds.toDouble() : 1.0,
-                      activeColor: theme.colorScheme.primary,
-                      onChanged: (val) {
-                        audioState.audioPlayer.seek(Duration(seconds: val.toInt()));
-                      },
+                    // Căutarea - o facem semi-transparentă elegantă
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+                      child: TextField(
+                        controller: _searchController,
+                        onChanged: (value) {
+                          _searchQuery = value;
+                          _applySortingAndFiltering();
+                        },
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          hintText: "Caută o melodie...",
+                          hintStyle: const TextStyle(color: Colors.white60),
+                          prefixIcon: const Icon(Icons.search, color: Colors.white70),
+                          suffixIcon: _searchQuery.isNotEmpty 
+                              ? IconButton(
+                                  icon: const Icon(Icons.clear, color: Colors.white70),
+                                  onPressed: () {
+                                    _searchController.clear();
+                                    _searchQuery = "";
+                                    _applySortingAndFiltering();
+                                  },
+                                )
+                              : null,
+                          filled: true,
+                          fillColor: Colors.black.withOpacity(0.3),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide.none,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                        ),
+                      ),
                     ),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(_formatDuration(audioState.position), style: const TextStyle(fontSize: 11)),
-                        Text(_formatDuration(audioState.duration), style: const TextStyle(fontSize: 11)),
-                      ],
+
+                    const Spacer(),
+
+                    // Secțiunea Info Melodie Curentă
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Text(
+                            audioState.currentSongTitle.isNotEmpty ? audioState.currentSongTitle : 'Selectează o melodie',
+                            textAlign: TextAlign.center,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: moodColors.textColor,
+                              fontSize: 22,
+                              fontWeight: FontWeight.bold,
+                              shadows: const [Shadow(color: Colors.black87, blurRadius: 10, offset: Offset(0, 2))],
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            audioState.currentArtist.isNotEmpty ? audioState.currentArtist : '',
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: moodColors.textColor.withOpacity(0.85),
+                              fontSize: 15,
+                              fontWeight: FontWeight.w500,
+                              shadows: const [Shadow(color: Colors.black87, blurRadius: 8)],
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        IconButton(
-                          iconSize: 32,
-                          icon: const Icon(Icons.skip_previous),
-                          onPressed: () => audioState.playPrevious(),
-                        ),
-                        const SizedBox(width: 16),
-                        IconButton(
-                          iconSize: 48,
-                          icon: Icon(audioState.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled),
-                          color: theme.colorScheme.primary,
-                          onPressed: () => audioState.togglePlayPause(),
-                        ),
-                        const SizedBox(width: 16),
-                        IconButton(
-                          iconSize: 32,
-                          icon: const Icon(Icons.skip_next),
-                          onPressed: () => audioState.playNext(),
-                        ),
-                      ],
+
+                    const SizedBox(height: 24),
+
+                    // Slider și Controale Media
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Column(
+                        children: [
+                          Slider(
+                            value: audioState.position.inSeconds.toDouble().clamp(0.0, audioState.duration.inSeconds.toDouble()),
+                            max: audioState.duration.inSeconds > 0 ? audioState.duration.inSeconds.toDouble() : 1.0,
+                            activeColor: moodColors.accentColor,
+                            inactiveColor: Colors.white24,
+                            onChanged: (val) {
+                              audioState.audioPlayer.seek(Duration(seconds: val.toInt()));
+                            },
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(_formatDuration(audioState.position), style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                                Text(_formatDuration(audioState.duration), style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                              ],
+                            ),
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              IconButton(
+                                iconSize: 36,
+                                icon: const Icon(Icons.skip_previous, color: Colors.white),
+                                onPressed: () => audioState.playPrevious(),
+                              ),
+                              const SizedBox(width: 16),
+                              IconButton(
+                                iconSize: 58,
+                                icon: Icon(audioState.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled),
+                                color: moodColors.accentColor,
+                                onPressed: () => audioState.togglePlayPause(),
+                              ),
+                              const SizedBox(width: 16),
+                              IconButton(
+                                iconSize: 36,
+                                icon: const Icon(Icons.skip_next, color: Colors.white),
+                                onPressed: () => audioState.playNext(),
+                              ),
+                            ],
+                            ),
+                        ],
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+                    const Divider(color: Colors.white12, height: 1),
+
+                    // Lista de Melodii (Ocupă jumătatea de jos a ecranului)
+                    Expanded(
+                      child: Container(
+                        color: Colors.black.withOpacity(0.4), // Fundal obscurizat sub listă
+                        child: _displayedFiles.isEmpty
+                            ? const Center(child: Text("Nu s-a găsit nicio melodie.", style: TextStyle(color: Colors.white70)))
+                            : ListView.builder(
+                                padding: const EdgeInsets.only(top: 8, bottom: 16),
+                                itemCount: _displayedFiles.length,
+                                itemBuilder: (context, idx) {
+                                  final file = _displayedFiles[idx];
+                                  final fileName = file.path.split(Platform.pathSeparator).last;
+                                  final meta = parseArtistAndTitle(fileName);
+                                  
+                                  final isSelected = audioState.playlistFiles.isNotEmpty &&
+                                      audioState.currentIndex < audioState.playlistFiles.length &&
+                                      audioState.playlistFiles[audioState.currentIndex].path == file.path &&
+                                      audioState.currentPlaylistTitle == widget.playlist.title;
+                                      
+                                  final tileBgColor = _getSongAgeColor(context, idx, _displayedFiles.length);
+
+                                  return ListTile(
+                                    tileColor: isSelected ? moodColors.accentColor.withOpacity(0.25) : tileBgColor,
+                                    dense: true,
+                                    leading: isSelected
+                                        ? Icon(Icons.graphic_eq, color: moodColors.accentColor)
+                                        : Text("${idx + 1}", style: const TextStyle(color: Colors.white60, fontSize: 11)),
+                                    title: Text(
+                                      meta.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                                        color: isSelected ? moodColors.accentColor : Colors.white,
+                                      ),
+                                    ),
+                                    subtitle: Text(
+                                      meta.artist,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(fontSize: 11, color: isSelected ? moodColors.accentColor.withOpacity(0.8) : Colors.white60),
+                                    ),
+                                    onTap: () {
+                                      final updatedModel = LocalPlaylistModel(
+                                        title: widget.playlist.title,
+                                        directory: widget.playlist.directory,
+                                        audioFiles: _displayedFiles,
+                                        totalYoutubeCount: widget.playlist.totalYoutubeCount,
+                                      );
+                                      audioState.loadPlaylist(updatedModel, idx);
+                                    },
+                                  );
+                                },
+                              ),
+                      ),
                     ),
                   ],
                 ),
-              ),
-
-              const Divider(height: 1),
-
-              Expanded(
-                child: _displayedFiles.isEmpty
-                    ? const Center(child: Text("Nu s-a găsit nicio melodie."))
-                    : ListView.builder(
-                        itemCount: _displayedFiles.length,
-                        itemBuilder: (context, idx) {
-                          final file = _displayedFiles[idx];
-                          final fileName = file.path.split(Platform.pathSeparator).last;
-                          final meta = parseArtistAndTitle(fileName);
-                          
-                          final isSelected = audioState.playlistFiles.isNotEmpty &&
-                              audioState.currentIndex < audioState.playlistFiles.length &&
-                              audioState.playlistFiles[audioState.currentIndex].path == file.path &&
-                              audioState.currentPlaylistTitle == widget.playlist.title;
-                              
-                          final tileBgColor = _getSongAgeColor(context, idx, _displayedFiles.length);
-
-                          return ListTile(
-                            tileColor: isSelected ? theme.colorScheme.primary.withOpacity(0.2) : tileBgColor,
-                            dense: true,
-                            leading: isSelected
-                                ? Icon(Icons.graphic_eq, color: theme.colorScheme.primary)
-                                : Text("${idx + 1}", style: const TextStyle(color: Colors.grey, fontSize: 11)),
-                            title: Text(
-                              meta.title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                                color: isSelected ? theme.colorScheme.primary : null,
-                              ),
-                            ),
-                            subtitle: Text(
-                              meta.artist,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(fontSize: 11, color: isSelected ? theme.colorScheme.primary.withOpacity(0.8) : Colors.grey),
-                            ),
-                            onTap: () {
-                              final updatedModel = LocalPlaylistModel(
-                                title: widget.playlist.title,
-                                directory: widget.playlist.directory,
-                                audioFiles: _displayedFiles,
-                                totalYoutubeCount: widget.playlist.totalYoutubeCount,
-                              );
-                              audioState.loadPlaylist(updatedModel, idx);
-                            },
-                          );
-                        },
-                      ),
               ),
             ],
           );
@@ -1365,8 +1433,10 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
   }
 }
 
+
+
 // ==========================================
-// DOWNLOADER SCREEN
+// DOWNLOADER & SYNC CONTENT SCREEN
 // ==========================================
 class MusicSyncHomePage extends StatefulWidget {
   const MusicSyncHomePage({super.key});
@@ -1394,7 +1464,6 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
 
   final List<String> _logs = [];
   final ScrollController _logScrollController = ScrollController();
-
   String? _selectedDirectoryPath;
 
   @override
@@ -1455,13 +1524,8 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
         final name = data['name'] as String?;
         
         final prefs = await SharedPreferences.getInstance();
-        
-        if (email != null && email.isNotEmpty) {
-          await prefs.setString('user_logged_email', email);
-        }
-        if (name != null && name.isNotEmpty) {
-          await prefs.setString('user_logged_name', name);
-        }
+        if (email != null && email.isNotEmpty) await prefs.setString('user_logged_email', email);
+        if (name != null && name.isNotEmpty) await prefs.setString('user_logged_name', name);
 
         setState(() {
           if (name != null && name.isNotEmpty) {
@@ -1478,22 +1542,14 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
     try {
       final creds = await _googleSignIn.signIn();
       if (creds != null) {
-        setState(() {
-          _credentials = creds;
-        });
-
-        if (creds.accessToken != null) {
-          await _fetchAndSaveUserEmail(creds.accessToken!);
-        }
-
+        setState(() => _credentials = creds);
+        if (creds.accessToken != null) await _fetchAndSaveUserEmail(creds.accessToken!);
         await _fetchPlaylists();
       } else if (!isAutoLogin) {
         _showErrorDialog('Autentificare', 'Conectarea a fost anulată.');
       }
     } catch (e) {
-      if (!isAutoLogin) {
-        _showErrorDialog('Eroare Google Sign-In', e);
-      }
+      if (!isAutoLogin) _showErrorDialog('Eroare Google Sign-In', e);
     }
   }
 
@@ -1521,13 +1577,9 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
       AccessCredentials(
         AccessToken('Bearer', _credentials!.accessToken!, DateTime.now().toUtc().add(const Duration(hours: 1))),
         null,
-        [
-          youtube.YouTubeApi.youtubeReadonlyScope,
-          'https://www.googleapis.com/auth/userinfo.email',
-        ],
+        [youtube.YouTubeApi.youtubeReadonlyScope, 'https://www.googleapis.com/auth/userinfo.email'],
       ),
     );
-
     return youtube.YouTubeApi(authClient);
   }
 
@@ -1535,17 +1587,10 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
     final youtubeApi = await _getYouTubeApi();
     if (youtubeApi == null) return;
 
-    setState(() {
-      _isLoading = true;
-    });
+    setState(() => _isLoading = true);
 
     try {
-      final response = await youtubeApi.playlists.list(
-        ['snippet', 'contentDetails'],
-        mine: true,
-        maxResults: 50,
-      );
-
+      final response = await youtubeApi.playlists.list(['snippet', 'contentDetails'], mine: true, maxResults: 50);
       List<youtube.Playlist> fetched = response.items ?? [];
 
       final prefs = await SharedPreferences.getInstance();
@@ -1555,23 +1600,16 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
       for (String customId in _customPlaylistIds) {
         if (!fetched.any((p) => p.id == customId)) {
           final loadedCustom = await _fetchSinglePlaylist(youtubeApi, customId);
-          if (loadedCustom != null) {
-            fetched.insert(0, loadedCustom);
-          }
+          if (loadedCustom != null) fetched.insert(0, loadedCustom);
         }
       }
 
-      setState(() {
-        _playlists = fetched;
-      });
-
+      setState(() => _playlists = fetched);
       _addLog('S-au încărcat ${_playlists.length} playlist-uri.');
     } catch (e) {
       _showErrorDialog('Eroare YouTube Playlists', e);
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() => _isLoading = false);
     }
   }
 
@@ -1581,7 +1619,6 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
       int itemCount = 0;
 
       final playlistDetails = await api.playlists.list(['snippet', 'contentDetails'], id: [cleanId]);
-
       if (playlistDetails.items != null && playlistDetails.items!.isNotEmpty) {
         final item = playlistDetails.items!.first;
         title = item.snippet?.title ?? title;
@@ -1608,13 +1645,9 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
   Future<void> _pickFolder() async {
     final folder = await _downloadService.selectOutputDirectory();
     if (folder != null) {
-      setState(() {
-        _selectedDirectoryPath = folder;
-      });
-
+      setState(() => _selectedDirectoryPath = folder);
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('saved_output_dir', folder);
-
       _addLog('Folder salvat: $folder');
     }
   }
@@ -1658,14 +1691,12 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
     if (api == null) return;
 
     final cleanId = _extractPlaylistId(input);
-
     if (_playlists.any((p) => p.id == cleanId)) {
       _addLog('[INFO] Playlist-ul există deja în listă.');
       return;
     }
 
     _addLog('[INFO] Preluare informații pentru playlist-ul $cleanId...');
-
     final newPlaylist = await _fetchSinglePlaylist(api, cleanId);
 
     if (newPlaylist != null) {
@@ -1673,9 +1704,8 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
         _playlists.insert(0, newPlaylist);
         _customPlaylistIds.add(cleanId);
       });
-
       await _saveCustomPlaylistsToDisk();
-      _addLog('[SUCCESS] S-a adăugat și salvat pe disc: "${newPlaylist.snippet?.title}"!');
+      _addLog('[SUCCESS] S-a adăugat: "${newPlaylist.snippet?.title}"!');
     } else {
       _addLog('[ERROR] Nu s-au putut prelua detaliile playlist-ului.');
       _showErrorDialog('Eroare adăugare playlist', 'Nu s-a putut găsi playlist-ul cu acest link.');
@@ -1817,13 +1847,12 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
         _addLog('[STOP] Descărcare oprită de utilizator.');
       } else {
         final totalDone = result.successCount + result.skippedCount;
-        _addLog('Finalizat! Descărcate noi: ${result.successCount}, Existente deja: ${result.skippedCount}');
+        _addLog('Finalizat! Noi: ${result.successCount}, Existente: ${result.skippedCount}');
 
         if (result.failedSongs.isNotEmpty) {
           _showErrorDialog(
             'Rezultat Descărcare',
-            'S-au procesat $totalDone din ${itemsList.length} piese.\n\n'
-            'Erori:\n• ' + result.failedSongs.join('\n• '),
+            'S-au procesat $totalDone din ${itemsList.length} piese.\n\nErori:\n• ' + result.failedSongs.join('\n• '),
           );
         } else {
           ScaffoldMessenger.of(context).showSnackBar(

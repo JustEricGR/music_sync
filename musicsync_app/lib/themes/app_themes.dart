@@ -22,6 +22,7 @@ class CountryTheme {
   final Color accentColor;
   final Color cardBackground;
   final Map<SongMood, PlayerColors> playerMoods;
+  final List<String> assetPhotos;
 
   CountryTheme({
     required this.id,
@@ -31,6 +32,7 @@ class CountryTheme {
     required this.accentColor,
     required this.cardBackground,
     required this.playerMoods,
+    required this.assetPhotos,
   });
 }
 
@@ -43,6 +45,13 @@ final Map<String, CountryTheme> appThemes = {
     id: 'armenia',
     name: 'Armenia',
     scaffoldBackground: const Color(0xFF1A100A),
+    assetPhotos: [
+      "assets\images\armenia\armenia1.jpg",
+      "assets\images\armenia\armenia2.jpg",
+      "assets\images\armenia\armenia3.jpg",
+      "assets\images\armenia\armenia4.jpg",
+      "assets\images\armenia\armenia5.jpg"
+    ],
     textColor: const Color(0xFFF5ECD7),
     accentColor: const Color(0xFFC8241A),
     cardBackground: const Color(0xFF2A1A10),
@@ -77,6 +86,15 @@ final Map<String, CountryTheme> appThemes = {
     id: 'grecia',
     name: 'Grecia',
     scaffoldBackground: const Color(0xFFF4EED8),
+    assetPhotos: [
+      "assets\images\greece\greece1.jpg",
+      "assets\images\greece\greece2.jpg",
+      "assets\images\greece\greece3.jpg",
+      "assets\images\greece\greece4.jpg",
+      "assets\images\greece\greece5.jpg",
+      "assets\images\greece\greece6.jpg",
+      "assets\images\greece\greece7.jpg"
+    ],
     textColor: const Color(0xFF1A2A3A),
     accentColor: const Color(0xFF1A5FA8),
     cardBackground: const Color(0xFFFFFFFF),
@@ -117,6 +135,16 @@ final Map<String, CountryTheme> appThemes = {
     name: 'Iran',
     // Deep saffron-night — like the sky behind Damavand at dusk
     scaffoldBackground: const Color(0xFF1A0F00),
+    assetPhotos: [
+      "assets\images\iran\iran1.jpg",
+      "assets\images\iran\iran2.jpg",
+      "assets\images\iran\iran3.jpg",
+      "assets\images\iran\iran4.jpg",
+      "assets\images\iran\iran5.jpg",
+      "assets\images\iran\iran6.jpg",
+      "assets\images\iran\iran7.jpg",
+      "assets\images\iran\iran8.jpg"
+    ],
     textColor: const Color(0xFFF5E6C8),       // warm parchment
     accentColor: const Color(0xFFD4890A),      // saffron gold
     cardBackground: const Color(0xFF2C1A00),   // dark spice brown
@@ -162,6 +190,14 @@ final Map<String, CountryTheme> appThemes = {
     name: 'Turcia',
     // Istanbul at golden hour — the amber haze over the Bosphorus
     scaffoldBackground: const Color(0xFF1C1208),
+    assetPhotos: [
+      "assets\images\turkey\turkey1.jpg",
+      "assets\images\turkey\turkey2.jpg",
+      "assets\images\turkey\turkey3.jpg",
+      "assets\images\turkey\turkey4.jpg",
+      "assets\images\turkey\turkey5.jpg",
+      "assets\images\turkey\turkey6.jpg"
+    ],
     textColor: const Color(0xFFF0E0C0),        // aged parchment
     accentColor: const Color(0xFF1B6CA8),       // Iznik tile cobalt
     cardBackground: const Color(0xFF2A1E0A),    // dark Ottoman wood
@@ -208,6 +244,129 @@ final Map<String, CountryTheme> appThemes = {
     name: 'Azerbaidjan',
     // Deep carpet burgundy — like the traditional Azerbaijani kilim
     scaffoldBackground: const Color(0xFF180A10),
+    assetPhotos: [
+      "assets\images\azerbaijan\azerbaijan1.jpg"
+    ],
+    textColor: const Color(0xFFF5ECD7),        // carpet ivory
+    accentColor: const Color(0xFF00B9E4),       // flag sky blue
+    cardBackground: const Color(0xFF2A1018),    // dark pomegranate wine
+    playerMoods: {
+      // Chill — Caucasus highlands at dawn: slate green + misty blue
+      SongMood.chill: PlayerColors(
+        gradientColors: [const Color(0xFF1A2E1A), const Color(0xFF2A4A4A)],
+        textColor: const Color(0xFFCCE5E5),
+        accentColor: const Color(0xFF5BBFBF),
+      ),
+      // Acoustic — traditional carpet & tea: burgundy + ivory + copper
+      SongMood.acoustic: PlayerColors(
+        gradientColors: [const Color(0xFF4A1020), const Color(0xFF6B1D2E)],
+        textColor: const Color(0xFFF5ECD7),
+        accentColor: const Color(0xFFD4622A),   // copper samovar
+      ),
+      // Energetic — flag colors: crimson + sky blue Baku flame energy
+      SongMood.energetic: PlayerColors(
+        gradientColors: [const Color(0xFFAA1528), const Color(0xFFEF3340)],
+        textColor: Colors.white,
+        accentColor: const Color(0xFF00B9E4),   // flag sky blue
+      ),
+      // Melancholic — pomegranate deep ruby + sandstone mosque dusk
+      SongMood.melancholic: PlayerColors(
+        gradientColors: [const Color(0xFF3D1010), const Color(0xFF5C1A1A)],
+        textColor: const Color(0xFFE8C8A0),
+        accentColor: const Color(0xFF8B1A2A),   // deep pomegranate
+      ),
+    },
+  ),
+
+  'kurdistan': CountryTheme(
+    id: 'kurdistan',
+    name: 'Kurdistan',
+    // Deep carpet burgundy — like the traditional Azerbaijani kilim
+    scaffoldBackground: const Color(0xFF180A10),
+    assetPhotos: [
+      "assets\images\kurdistan\kurdistan1.jpg",
+      "assets\images\kurdistan\kurdistan2.jpg",
+      "assets\images\kurdistan\kurdistan3.jpg",
+      "assets\images\kurdistan\kurdistan4.jpg"
+    ],
+    textColor: const Color(0xFFF5ECD7),        // carpet ivory
+    accentColor: const Color(0xFF00B9E4),       // flag sky blue
+    cardBackground: const Color(0xFF2A1018),    // dark pomegranate wine
+    playerMoods: {
+      // Chill — Caucasus highlands at dawn: slate green + misty blue
+      SongMood.chill: PlayerColors(
+        gradientColors: [const Color(0xFF1A2E1A), const Color(0xFF2A4A4A)],
+        textColor: const Color(0xFFCCE5E5),
+        accentColor: const Color(0xFF5BBFBF),
+      ),
+      // Acoustic — traditional carpet & tea: burgundy + ivory + copper
+      SongMood.acoustic: PlayerColors(
+        gradientColors: [const Color(0xFF4A1020), const Color(0xFF6B1D2E)],
+        textColor: const Color(0xFFF5ECD7),
+        accentColor: const Color(0xFFD4622A),   // copper samovar
+      ),
+      // Energetic — flag colors: crimson + sky blue Baku flame energy
+      SongMood.energetic: PlayerColors(
+        gradientColors: [const Color(0xFFAA1528), const Color(0xFFEF3340)],
+        textColor: Colors.white,
+        accentColor: const Color(0xFF00B9E4),   // flag sky blue
+      ),
+      // Melancholic — pomegranate deep ruby + sandstone mosque dusk
+      SongMood.melancholic: PlayerColors(
+        gradientColors: [const Color(0xFF3D1010), const Color(0xFF5C1A1A)],
+        textColor: const Color(0xFFE8C8A0),
+        accentColor: const Color(0xFF8B1A2A),   // deep pomegranate
+      ),
+    },
+  ),
+
+  'bosnia': CountryTheme(
+    id: 'bosnia',
+    name: 'Bosnia',
+    // Deep carpet burgundy — like the traditional Azerbaijani kilim
+    scaffoldBackground: const Color(0xFF180A10),
+    assetPhotos: [
+      "assets\images\bosnia\bosnia1.jpg"
+    ],
+    textColor: const Color(0xFFF5ECD7),        // carpet ivory
+    accentColor: const Color(0xFF00B9E4),       // flag sky blue
+    cardBackground: const Color(0xFF2A1018),    // dark pomegranate wine
+    playerMoods: {
+      // Chill — Caucasus highlands at dawn: slate green + misty blue
+      SongMood.chill: PlayerColors(
+        gradientColors: [const Color(0xFF1A2E1A), const Color(0xFF2A4A4A)],
+        textColor: const Color(0xFFCCE5E5),
+        accentColor: const Color(0xFF5BBFBF),
+      ),
+      // Acoustic — traditional carpet & tea: burgundy + ivory + copper
+      SongMood.acoustic: PlayerColors(
+        gradientColors: [const Color(0xFF4A1020), const Color(0xFF6B1D2E)],
+        textColor: const Color(0xFFF5ECD7),
+        accentColor: const Color(0xFFD4622A),   // copper samovar
+      ),
+      // Energetic — flag colors: crimson + sky blue Baku flame energy
+      SongMood.energetic: PlayerColors(
+        gradientColors: [const Color(0xFFAA1528), const Color(0xFFEF3340)],
+        textColor: Colors.white,
+        accentColor: const Color(0xFF00B9E4),   // flag sky blue
+      ),
+      // Melancholic — pomegranate deep ruby + sandstone mosque dusk
+      SongMood.melancholic: PlayerColors(
+        gradientColors: [const Color(0xFF3D1010), const Color(0xFF5C1A1A)],
+        textColor: const Color(0xFFE8C8A0),
+        accentColor: const Color(0xFF8B1A2A),   // deep pomegranate
+      ),
+    },
+  ),
+
+  'central asia': CountryTheme(
+    id: 'central asia',
+    name: 'Central Asia',
+    // Deep carpet burgundy — like the traditional Azerbaijani kilim
+    scaffoldBackground: const Color(0xFF180A10),
+    assetPhotos: [
+      "assets\images\central_asia\central_asia1.jpg"
+    ],
     textColor: const Color(0xFFF5ECD7),        // carpet ivory
     accentColor: const Color(0xFF00B9E4),       // flag sky blue
     cardBackground: const Color(0xFF2A1018),    // dark pomegranate wine
