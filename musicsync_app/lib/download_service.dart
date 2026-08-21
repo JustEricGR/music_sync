@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:googleapis/youtube/v3.dart' as youtube;
 import 'package:path/path.dart' as p;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:flutter/services.dart';
 
 
 // ── Structuri de date de sprijin ──────────────────────────────────────────
@@ -66,6 +67,8 @@ class DownloadSyncService {
   bool _isCancelled = false;
   Process? _activeProcessWindows;
   HttpClient? _httpClient;
+  static const MethodChannel _ytDlpChannel =
+    MethodChannel('musicsync/ytdlp');
 
   void cancelDownload() {
     _isCancelled = true;
@@ -230,286 +233,84 @@ class DownloadSyncService {
         }
 
       } else if (Platform.isAndroid) {
-  for (int attempt = 1; attempt <= 3; attempt++) {
-    if (_isCancelled) break;
-
-    HttpClient? client;
-    IOSink? sink;
-    File? currentOutputFile;
-
-    try {
-      await DownloadNotificationManager.update(
-        title: rawTitle,
-        body: 'Pregătire audio... • Piesa ${i + 1} din $totalSongs',
-        progress: 0,
-        maxProgress: 100,
-      );
-
-      onProgress(DownloadProgressInfo(
-        currentSongTitle: rawTitle,
-        statusMessage: 'Serverul pregătește audio...',
-        songProgress: 0.0,
-        overallProgress: i / totalSongs,
-        currentIndex: i + 1,
-        totalCount: totalSongs,
-        logMessage:
-            '[SERVER] Se solicită "$rawTitle" de la MusicSync API (attempt $attempt)...',
-      ));
-
-      final uri = Uri.parse(
-        'https://music-sync-efl7.onrender.com/download/$videoId',
-      );
-
-      client = HttpClient();
-
-      // Render Free poate avea cold start, deci îi dăm timp.
-      client.connectionTimeout = const Duration(seconds: 90);
-
-      final request = await client.getUrl(uri);
-
-      final response = await request.close().timeout(
-        const Duration(minutes: 4),
-      );
-
-      if (_isCancelled) {
-        client.close(force: true);
-        break;
-      }
-
-      if (response.statusCode != HttpStatus.ok) {
-        String errorBody = '';
-
         try {
-          errorBody = await response
-              .transform(utf8.decoder)
-              .join()
-              .timeout(
-                const Duration(seconds: 15),
-                onTimeout: () => '',
-              );
-        } catch (_) {}
-
-        throw HttpException(
-          'Server HTTP ${response.statusCode}'
-          '${errorBody.isNotEmpty ? ': $errorBody' : ''}',
-        );
-      }
-
-      // Backendul nostru trimite extensia reală.
-      final serverExtension =
-          response.headers.value('x-musicsync-extension') ?? 'm4a';
-
-      final normalizedExtension = serverExtension
-          .replaceAll('.', '')
-          .trim()
-          .toLowerCase();
-
-      final actualExtension =
-          normalizedExtension.isEmpty ? 'm4a' : normalizedExtension;
-
-      final finalOutputPath = p.join(
-        playlistFolder.path,
-        '$safeSongTitle.$actualExtension',
-      );
-
-      currentOutputFile = File(finalOutputPath);
-
-      // Dacă a rămas un fișier parțial de la o încercare precedentă,
-      // îl ștergem înainte.
-      if (await currentOutputFile.exists()) {
-        await currentOutputFile.delete();
-      }
-
-      sink = currentOutputFile.openWrite();
-
-      final totalBytes = response.contentLength;
-      int bytesDownloaded = 0;
-      int lastNotifPercent = -1;
-
-      onProgress(DownloadProgressInfo(
-        currentSongTitle: rawTitle,
-        statusMessage: 'Începe descărcarea...',
-        songProgress: 0.0,
-        overallProgress: i / totalSongs,
-        currentIndex: i + 1,
-        totalCount: totalSongs,
-        logMessage:
-            '[DOWNLOAD] Serverul a pregătit "$rawTitle". Încep transferul...',
-      ));
-
-      await for (final chunk in response.timeout(
-        const Duration(seconds: 45),
-      )) {
-        if (_isCancelled) {
-          break;
-        }
-
-        sink.add(chunk);
-        bytesDownloaded += chunk.length;
-
-        if (totalBytes > 0) {
-          final currentSongProg =
-              (bytesDownloaded / totalBytes).clamp(0.0, 1.0);
-
-          final currentOverall =
-              ((i + currentSongProg) / totalSongs).clamp(0.0, 1.0);
-
-          final percent = (currentSongProg * 100).round();
-
-          if (percent != lastNotifPercent) {
-            lastNotifPercent = percent;
-
-            await DownloadNotificationManager.update(
-              title: rawTitle,
-              body: '$percent% • Piesa ${i + 1} din $totalSongs',
-              progress: percent,
-              maxProgress: 100,
-            );
-          }
-
           onProgress(DownloadProgressInfo(
             currentSongTitle: rawTitle,
-            statusMessage: 'Descărcare: $percent%',
-            songProgress: currentSongProg,
-            overallProgress: currentOverall,
+            statusMessage: 'Pregătire yt-dlp local...',
+            songProgress: 0.0,
+            overallProgress: i / totalSongs,
             currentIndex: i + 1,
             totalCount: totalSongs,
-            logMessage: '',
+            logMessage: '[LOCAL YT-DLP] Se descarcă "$rawTitle"...',
           ));
-        } else {
-          // În caz că Render nu trimite Content-Length.
-          onProgress(DownloadProgressInfo(
-            currentSongTitle: rawTitle,
-            statusMessage: 'Se descarcă audio...',
-            songProgress: 0.5,
-            overallProgress:
-                ((i + 0.5) / totalSongs).clamp(0.0, 1.0),
-            currentIndex: i + 1,
-            totalCount: totalSongs,
-            logMessage: '',
-          ));
-        }
-      }
 
-      await sink.flush();
-      await sink.close();
-      sink = null;
+          await DownloadNotificationManager.update(
+            title: rawTitle,
+            body: 'Descărcare locală • Piesa ${i + 1} din $totalSongs',
+            progress: 0,
+            maxProgress: 100,
+          );
 
-      client.close();
-      client = null;
+          final baseOutputPath = p.join(playlistFolder.path, safeSongTitle);
 
-      if (_isCancelled) {
-        if (currentOutputFile != null &&
-            await currentOutputFile.exists()) {
-          await currentOutputFile.delete();
-        }
+          final dynamic response = await _ytDlpChannel.invokeMethod(
+            'downloadAudio',
+            {
+              'videoId': videoId,
+              'outputPath': baseOutputPath,
+            },
+          );
 
-        break;
-      }
-
-      if (currentOutputFile == null ||
-          !await currentOutputFile.exists()) {
-        throw Exception(
-          'Fișierul audio nu a fost creat după download.',
-        );
-      }
-
-      final downloadedSize = await currentOutputFile.length();
-
-      if (downloadedSize < 50000) {
-        await currentOutputFile.delete();
-
-        throw Exception(
-          'Fișier audio invalid sau incomplet '
-          '($downloadedSize bytes).',
-        );
-      }
-
-      downloadedSuccessfully = true;
-
-      debugPrint(
-        '[DL] SUCCESS SERVER: '
-        '"$rawTitle" -> ${currentOutputFile.path} '
-        '($downloadedSize bytes)',
-      );
-
-      onProgress(DownloadProgressInfo(
-        currentSongTitle: rawTitle,
-        statusMessage: 'Salvat cu succes!',
-        songProgress: 1.0,
-        overallProgress: (i + 1) / totalSongs,
-        currentIndex: i + 1,
-        totalCount: totalSongs,
-        logMessage:
-            '[SUCCESS] "$rawTitle" descărcat prin MusicSync Server.',
-      ));
-
-      break;
-    } catch (e) {
-      try {
-        await sink?.flush();
-      } catch (_) {}
-
-      try {
-        await sink?.close();
-      } catch (_) {}
-
-      sink = null;
-
-      try {
-        client?.close(force: true);
-      } catch (_) {}
-
-      client = null;
-
-      lastErrorMsg = e.toString().split('\n').first;
-
-      debugPrint(
-        '[DL] SERVER ERROR attempt $attempt: $lastErrorMsg',
-      );
-
-      // Ștergem fișierul incomplet.
-      if (currentOutputFile != null) {
-        try {
-          if (await currentOutputFile.exists()) {
-            await currentOutputFile.delete();
+          if (_isCancelled) {
+            break;
           }
-        } catch (_) {}
+
+          if (response == null) {
+            throw Exception('Nu s-a primit răspuns de la yt-dlp local.');
+          }
+
+          final Map<dynamic, dynamic> result =
+              Map<dynamic, dynamic>.from(response);
+
+          final bool success = result['success'] == true;
+          final String returnedPath = result['path']?.toString() ?? '';
+          final String error = result['error']?.toString() ?? '';
+
+          if (!success) {
+            throw Exception(error.isNotEmpty ? error : 'yt-dlp local a eșuat.');
+          }
+
+          if (returnedPath.isEmpty) {
+            throw Exception('yt-dlp nu a returnat calea fișierului.');
+          }
+
+          final outputFile = File(returnedPath);
+
+          if (!await outputFile.exists()) {
+            throw Exception('Fișierul rezultat nu există: $returnedPath');
+          }
+
+          final size = await outputFile.length();
+
+          if (size < 50000) {
+            try {
+              await outputFile.delete();
+            } catch (_) {}
+
+            throw Exception('Fișier incomplet: $size bytes');
+          }
+
+          downloadedSuccessfully = true;
+
+          debugPrint(
+            '[YT-DLP LOCAL SUCCESS] $returnedPath ($size bytes)',
+          );
+        } catch (e) {
+          lastErrorMsg = e.toString().split('\n').first;
+
+          debugPrint('[YT-DLP LOCAL ERROR] $lastErrorMsg');
+        }
       }
-
-      if (attempt < 3 && !_isCancelled) {
-        final delay = Duration(seconds: 3 * attempt);
-
-        onProgress(DownloadProgressInfo(
-          currentSongTitle: rawTitle,
-          statusMessage:
-              'Reîncercare în ${delay.inSeconds}s...',
-          songProgress: 0.0,
-          overallProgress: i / totalSongs,
-          currentIndex: i + 1,
-          totalCount: totalSongs,
-          logMessage:
-              '[RETRY] Server attempt $attempt eșuat pentru '
-              '"$rawTitle": $lastErrorMsg',
-        ));
-
-        await Future.delayed(delay);
-      }
-    } finally {
-      try {
-        await sink?.flush();
-      } catch (_) {}
-
-      try {
-        await sink?.close();
-      } catch (_) {}
-
-      try {
-        client?.close(force: true);
-      } catch (_) {}
-    }
-  }
-}
 
       if (downloadedSuccessfully) {
         successCount++;

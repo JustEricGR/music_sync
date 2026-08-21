@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+    id("com.chaquo.python")
 }
 
 android {
@@ -17,10 +18,18 @@ android {
 
     defaultConfig {
         applicationId = "com.example.musicsync_app"
-        minSdk = flutter.minSdkVersion
+        minSdk = 24
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        ndk {
+            abiFilters.clear()
+            abiFilters += listOf(
+                "arm64-v8a",
+                "x86_64"
+            )
+        }
     }
 
     buildTypes {
@@ -40,6 +49,17 @@ flutter {
     source = "../.."
 }
 
+chaquopy {
+    defaultConfig {
+        version = "3.13"
+
+        pip {
+            install("yt-dlp")
+            install("certifi")
+        }
+    }
+}
+
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
@@ -52,4 +72,16 @@ subprojects {
             }
         }
     }
+}
+
+/*
+ * IMPORTANT:
+ * Flutter adaugă implicit armeabi-v7a.
+ * După evaluarea proiectului îl eliminăm și păstrăm
+ * doar ABI-urile suportate de Python 3.13.
+ */
+afterEvaluate {
+    android.defaultConfig.ndk.abiFilters.clear()
+    android.defaultConfig.ndk.abiFilters.add("arm64-v8a")
+    android.defaultConfig.ndk.abiFilters.add("x86_64")
 }
