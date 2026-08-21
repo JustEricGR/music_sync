@@ -3,7 +3,11 @@ FROM node:25-bookworm-slim AS bgutil-build
 WORKDIR /opt/bgutil
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git && \
+    apt-get install -y --no-install-recommends \
+        git \
+        ca-certificates \
+        curl && \
+    update-ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 RUN git clone \
@@ -27,6 +31,7 @@ RUN apt-get update && \
         ca-certificates \
         curl \
         nodejs && \
+    update-ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -34,8 +39,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -U bgutil-ytdlp-pot-provider
+    pip install --no-cache-dir -r requirements.txt
 
 COPY --from=bgutil-build \
     /opt/bgutil-src/server/build \
