@@ -7,6 +7,7 @@ import 'package:googleapis/youtube/v3.dart' as youtube;
 import 'package:path/path.dart' as p;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
+
 // ── Structuri de date de sprijin ──────────────────────────────────────────
 class DownloadProgressInfo {
   final String currentSongTitle;
@@ -228,136 +229,287 @@ class DownloadSyncService {
           _activeProcessWindows = null;
         }
 
-      // ── PLATFORMA ANDROID (Public Proxies Direct Extractor) ─────────────
-      // ── PLATFORMA ANDROID (Multi-API Stable Extractor) ───────────────
       } else if (Platform.isAndroid) {
-        String? audioUrl;
+  for (int attempt = 1; attempt <= 3; attempt++) {
+    if (_isCancelled) break;
 
-        // Lista de API-uri verificat active (fallback rapid)
-        final providers = [
-          'https://pipedapi.kavin.rocks/streams/$videoId',
-          'https://api.piped.privacydev.net/streams/$videoId',
-          'https://invidious.privacydev.net/api/v1/videos/$videoId',
-          'https://inv.nadeko.net/api/v1/videos/$videoId',
-          'https://co.wuk.sh/api/json',
-        ];
+    HttpClient? client;
+    IOSink? sink;
+    File? currentOutputFile;
 
-        for (final provider in providers) {
-          if (_isCancelled) break;
-          try {
-            if (provider.contains('co.wuk.sh')) {
-              // Cobalt Official API
-              final req = await _httpClient!.postUrl(Uri.parse(provider));
-              req.headers.set('Content-Type', 'application/json');
-              req.headers.set('Accept', 'application/json');
-              req.add(utf8.encode(jsonEncode({
-                'url': 'https://www.youtube.com/watch?v=$videoId',
-                'downloadMode': 'audio',
-                'audioFormat': 'm4a',
-              })));
+    try {
+      await DownloadNotificationManager.update(
+        title: rawTitle,
+        body: 'Pregătire audio... • Piesa ${i + 1} din $totalSongs',
+        progress: 0,
+        maxProgress: 100,
+      );
 
-              final res = await req.close().timeout(const Duration(seconds: 3));
-              if (res.statusCode == 200) {
-                final body = await res.transform(utf8.decoder).join();
-                final json = jsonDecode(body);
-                if (json['url'] != null) {
-                  audioUrl = json['url'];
-                  break;
-                }
-              }
-            } else if (provider.contains('piped')) {
-              // Piped API (Kavin / PrivacyDev)
-              final req = await _httpClient!.getUrl(Uri.parse(provider)).timeout(const Duration(seconds: 3));
-              final res = await req.close();
-              if (res.statusCode == 200) {
-                final body = await res.transform(utf8.decoder).join();
-                final json = jsonDecode(body);
-                final streams = json['audioStreams'] as List?;
-                if (streams != null && streams.isNotEmpty) {
-                  // Luăm piesa cu bitrate maxim
-                  streams.sort((a, b) => (b['bitrate'] ?? 0).compareTo(a['bitrate'] ?? 0));
-                  audioUrl = streams.first['url'];
-                  break;
-                }
-              }
-            } else {
-              // Invidious API
-              final req = await _httpClient!.getUrl(Uri.parse(provider)).timeout(const Duration(seconds: 3));
-              final res = await req.close();
-              if (res.statusCode == 200) {
-                final body = await res.transform(utf8.decoder).join();
-                final json = jsonDecode(body);
-                final formats = json['adaptiveFormats'] as List?;
-                if (formats != null) {
-                  final audioOnly = formats.where((f) => f['type']?.toString().contains('audio') ?? false).toList();
-                  if (audioOnly.isNotEmpty) {
-                    audioOnly.sort((a, b) => (b['bitrate'] ?? 0).compareTo(a['bitrate'] ?? 0));
-                    audioUrl = audioOnly.first['url'];
-                    break;
-                  }
-                }
-              }
-            }
-          } catch (e) {
-            // Dacă un server dă timeout sau host lookup error, trece instant la următorul fără să blocheze aplicația
-            debugPrint('Skip provider $provider: $e');
-          }
+      onProgress(DownloadProgressInfo(
+        currentSongTitle: rawTitle,
+        statusMessage: 'Serverul pregătește audio...',
+        songProgress: 0.0,
+        overallProgress: i / totalSongs,
+        currentIndex: i + 1,
+        totalCount: totalSongs,
+        logMessage:
+            '[SERVER] Se solicită "$rawTitle" de la MusicSync API (attempt $attempt)...',
+      ));
+
+      final uri = Uri.parse(
+        'https://music-sync-efl7.onrender.com/download/$videoId',
+      );
+
+      client = HttpClient();
+
+      // Render Free poate avea cold start, deci îi dăm timp.
+      client.connectionTimeout = const Duration(seconds: 90);
+
+      final request = await client.getUrl(uri);
+
+      final response = await request.close().timeout(
+        const Duration(minutes: 4),
+      );
+
+      if (_isCancelled) {
+        client.close(force: true);
+        break;
+      }
+
+      if (response.statusCode != HttpStatus.ok) {
+        String errorBody = '';
+
+        try {
+          errorBody = await response
+              .transform(utf8.decoder)
+              .join()
+              .timeout(
+                const Duration(seconds: 15),
+                onTimeout: () => '',
+              );
+        } catch (_) {}
+
+        throw HttpException(
+          'Server HTTP ${response.statusCode}'
+          '${errorBody.isNotEmpty ? ': $errorBody' : ''}',
+        );
+      }
+
+      // Backendul nostru trimite extensia reală.
+      final serverExtension =
+          response.headers.value('x-musicsync-extension') ?? 'm4a';
+
+      final normalizedExtension = serverExtension
+          .replaceAll('.', '')
+          .trim()
+          .toLowerCase();
+
+      final actualExtension =
+          normalizedExtension.isEmpty ? 'm4a' : normalizedExtension;
+
+      final finalOutputPath = p.join(
+        playlistFolder.path,
+        '$safeSongTitle.$actualExtension',
+      );
+
+      currentOutputFile = File(finalOutputPath);
+
+      // Dacă a rămas un fișier parțial de la o încercare precedentă,
+      // îl ștergem înainte.
+      if (await currentOutputFile.exists()) {
+        await currentOutputFile.delete();
+      }
+
+      sink = currentOutputFile.openWrite();
+
+      final totalBytes = response.contentLength;
+      int bytesDownloaded = 0;
+      int lastNotifPercent = -1;
+
+      onProgress(DownloadProgressInfo(
+        currentSongTitle: rawTitle,
+        statusMessage: 'Începe descărcarea...',
+        songProgress: 0.0,
+        overallProgress: i / totalSongs,
+        currentIndex: i + 1,
+        totalCount: totalSongs,
+        logMessage:
+            '[DOWNLOAD] Serverul a pregătit "$rawTitle". Încep transferul...',
+      ));
+
+      await for (final chunk in response.timeout(
+        const Duration(seconds: 45),
+      )) {
+        if (_isCancelled) {
+          break;
         }
 
-        // Descărcarea fișierului dacă am primit un URL valid
-        if (audioUrl != null && !_isCancelled) {
-          final outputFile = targetM4a;
-          try {
-            final req = await _httpClient!.getUrl(Uri.parse(audioUrl));
-            req.headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
-            final res = await req.close().timeout(const Duration(seconds: 45));
+        sink.add(chunk);
+        bytesDownloaded += chunk.length;
 
-            if (res.statusCode == 200 || res.statusCode == 206) {
-              final totalBytes = res.contentLength;
-              int downloadedBytes = 0;
-              final sink = outputFile.openWrite();
+        if (totalBytes > 0) {
+          final currentSongProg =
+              (bytesDownloaded / totalBytes).clamp(0.0, 1.0);
 
-              await for (final chunk in res) {
-                if (_isCancelled) break;
-                sink.add(chunk);
-                downloadedBytes += chunk.length;
+          final currentOverall =
+              ((i + currentSongProg) / totalSongs).clamp(0.0, 1.0);
 
-                if (totalBytes > 0) {
-                  final prog = (downloadedBytes / totalBytes).clamp(0.0, 1.0);
-                  onProgress(DownloadProgressInfo(
-                    currentSongTitle: rawTitle,
-                    statusMessage: 'Descărcare: ${(prog * 100).toInt()}%',
-                    songProgress: prog,
-                    overallProgress: ((i + prog) / totalSongs).clamp(0.0, 1.0),
-                    currentIndex: i + 1,
-                    totalCount: totalSongs,
-                    logMessage: '',
-                  ));
-                }
-              }
+          final percent = (currentSongProg * 100).round();
 
-              await sink.flush();
-              await sink.close();
+          if (percent != lastNotifPercent) {
+            lastNotifPercent = percent;
 
-              if (await outputFile.exists() && await outputFile.length() > 50000) {
-                downloadedSuccessfully = true;
-              } else {
-                lastErrorMsg = 'Fișier gol sau incomplet.';
-                if (await outputFile.exists()) await outputFile.delete();
-              }
-            } else {
-              lastErrorMsg = 'Server Error HTTP ${res.statusCode}';
-            }
-          } catch (e) {
-            lastErrorMsg = e.toString().split('\n').first;
-            if (await outputFile.exists()) {
-              try { await outputFile.delete(); } catch (_) {}
-            }
+            await DownloadNotificationManager.update(
+              title: rawTitle,
+              body: '$percent% • Piesa ${i + 1} din $totalSongs',
+              progress: percent,
+              maxProgress: 100,
+            );
           }
+
+          onProgress(DownloadProgressInfo(
+            currentSongTitle: rawTitle,
+            statusMessage: 'Descărcare: $percent%',
+            songProgress: currentSongProg,
+            overallProgress: currentOverall,
+            currentIndex: i + 1,
+            totalCount: totalSongs,
+            logMessage: '',
+          ));
         } else {
-          lastErrorMsg = 'Toate serverele au returnat offline.';
+          // În caz că Render nu trimite Content-Length.
+          onProgress(DownloadProgressInfo(
+            currentSongTitle: rawTitle,
+            statusMessage: 'Se descarcă audio...',
+            songProgress: 0.5,
+            overallProgress:
+                ((i + 0.5) / totalSongs).clamp(0.0, 1.0),
+            currentIndex: i + 1,
+            totalCount: totalSongs,
+            logMessage: '',
+          ));
         }
       }
+
+      await sink.flush();
+      await sink.close();
+      sink = null;
+
+      client.close();
+      client = null;
+
+      if (_isCancelled) {
+        if (currentOutputFile != null &&
+            await currentOutputFile.exists()) {
+          await currentOutputFile.delete();
+        }
+
+        break;
+      }
+
+      if (currentOutputFile == null ||
+          !await currentOutputFile.exists()) {
+        throw Exception(
+          'Fișierul audio nu a fost creat după download.',
+        );
+      }
+
+      final downloadedSize = await currentOutputFile.length();
+
+      if (downloadedSize < 50000) {
+        await currentOutputFile.delete();
+
+        throw Exception(
+          'Fișier audio invalid sau incomplet '
+          '($downloadedSize bytes).',
+        );
+      }
+
+      downloadedSuccessfully = true;
+
+      debugPrint(
+        '[DL] SUCCESS SERVER: '
+        '"$rawTitle" -> ${currentOutputFile.path} '
+        '($downloadedSize bytes)',
+      );
+
+      onProgress(DownloadProgressInfo(
+        currentSongTitle: rawTitle,
+        statusMessage: 'Salvat cu succes!',
+        songProgress: 1.0,
+        overallProgress: (i + 1) / totalSongs,
+        currentIndex: i + 1,
+        totalCount: totalSongs,
+        logMessage:
+            '[SUCCESS] "$rawTitle" descărcat prin MusicSync Server.',
+      ));
+
+      break;
+    } catch (e) {
+      try {
+        await sink?.flush();
+      } catch (_) {}
+
+      try {
+        await sink?.close();
+      } catch (_) {}
+
+      sink = null;
+
+      try {
+        client?.close(force: true);
+      } catch (_) {}
+
+      client = null;
+
+      lastErrorMsg = e.toString().split('\n').first;
+
+      debugPrint(
+        '[DL] SERVER ERROR attempt $attempt: $lastErrorMsg',
+      );
+
+      // Ștergem fișierul incomplet.
+      if (currentOutputFile != null) {
+        try {
+          if (await currentOutputFile.exists()) {
+            await currentOutputFile.delete();
+          }
+        } catch (_) {}
+      }
+
+      if (attempt < 3 && !_isCancelled) {
+        final delay = Duration(seconds: 3 * attempt);
+
+        onProgress(DownloadProgressInfo(
+          currentSongTitle: rawTitle,
+          statusMessage:
+              'Reîncercare în ${delay.inSeconds}s...',
+          songProgress: 0.0,
+          overallProgress: i / totalSongs,
+          currentIndex: i + 1,
+          totalCount: totalSongs,
+          logMessage:
+              '[RETRY] Server attempt $attempt eșuat pentru '
+              '"$rawTitle": $lastErrorMsg',
+        ));
+
+        await Future.delayed(delay);
+      }
+    } finally {
+      try {
+        await sink?.flush();
+      } catch (_) {}
+
+      try {
+        await sink?.close();
+      } catch (_) {}
+
+      try {
+        client?.close(force: true);
+      } catch (_) {}
+    }
+  }
+}
 
       if (downloadedSuccessfully) {
         successCount++;

@@ -10,6 +10,27 @@ import yt_dlp
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
+import urllib.request
+
+@app.get("/health")
+async def health():
+    provider_ok = False
+
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:4416/ping",
+            timeout=3
+        ) as r:
+            provider_ok = r.status == 200
+    except Exception:
+        provider_ok = False
+
+    return {
+        "status": "healthy",
+        "service": "MusicSync API",
+        "yt_dlp_version": yt_dlp.version.__version__,
+        "po_token_provider": provider_ok,
+    }
 
 
 app = FastAPI(
@@ -100,47 +121,37 @@ def download_with_ytdlp(video_id: str, temp_dir: str):
     )
 
     ydl_opts = {
-        # Preferă M4A, dar are fallback la orice audio bun.
         "format": (
             "bestaudio[ext=m4a]/"
             "bestaudio[ext=mp4]/"
             "bestaudio/best"
         ),
-
         "outtmpl": output_template,
-
-        # Nu permitem accidental playlist.
         "noplaylist": True,
 
-        # Evităm fișiere suplimentare.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["mweb"],
+            }
+        },
+
+        "retries": 5,
+        "fragment_retries": 5,
+        "extractor_retries": 3,
+        "socket_timeout": 30,
+        "concurrent_fragment_downloads": 1,
+
         "writesubtitles": False,
         "writeautomaticsub": False,
         "writethumbnail": False,
         "writeinfojson": False,
 
-        # Robustness
-        "retries": 5,
-        "fragment_retries": 5,
-        "extractor_retries": 3,
-        "socket_timeout": 30,
-
-        # Nu vrem 10 fragmente simultan pe Render Free.
-        "concurrent_fragment_downloads": 1,
-
-        # Continuă dacă există probleme recuperabile.
         "continuedl": True,
-
-        # Loguri utile în Render.
         "quiet": False,
         "no_warnings": False,
-
-        # Evităm suprascrieri ciudate.
         "overwrites": True,
-
-        # Nu descărcăm fișiere enorme accidental.
         "max_filesize": MAX_FILE_SIZE,
 
-        # User agent normal.
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Linux; Android 14) "
