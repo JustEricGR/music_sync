@@ -1,36 +1,16 @@
-import asyncio
 import os
+import json
 import re
 import shutil
 import tempfile
-import time
+import urllib.request
 from pathlib import Path
 
-import yt_dlp
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
-import urllib.request
 
-@app.get("/health")
-async def health():
-    provider_ok = False
-
-    try:
-        with urllib.request.urlopen(
-            "http://127.0.0.1:4416/ping",
-            timeout=3
-        ) as r:
-            provider_ok = r.status == 200
-    except Exception:
-        provider_ok = False
-
-    return {
-        "status": "healthy",
-        "service": "MusicSync API",
-        "yt_dlp_version": yt_dlp.version.__version__,
-        "po_token_provider": provider_ok,
-    }
+import yt_dlp
 
 
 app = FastAPI(
@@ -38,50 +18,18 @@ app = FastAPI(
     version="2.0.0",
 )
 
-# ------------------------------------------------------------------
-# CONFIG
-# ------------------------------------------------------------------
-
-# O singură extracție simultan pe Render Free.
-# E mai lent pentru mai mulți utilizatori, dar mult mai stabil.
-download_semaphore = asyncio.Semaphore(1)
-
-# Un YouTube video ID normal are 11 caractere.
 VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
-
-# Poți seta MUSICSYNC_API_KEY în Render -> Environment.
-# Dacă rămâne gol, API-ul funcționează fără autentificare.
-API_KEY = os.getenv("MUSICSYNC_API_KEY", "").strip()
-
-# Limită de siguranță.
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+MAX_FILE_SIZE = 100 * 1024 * 1024
 
 
-# ------------------------------------------------------------------
-# HELPERS
-# ------------------------------------------------------------------
-
-def cleanup_directory(directory: str):
+def cleanup_directory(path: str):
     try:
-        shutil.rmtree(directory, ignore_errors=True)
-    except Exception as exc:
-        print(f"[CLEANUP] {exc}")
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception as e:
+        print(f"[CLEANUP ERROR] {e}")
 
 
-def verify_api_key(received_key: str | None):
-    if not API_KEY:
-        return
-
-    if received_key != API_KEY:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid MusicSync API key.",
-        )
-
-
-def find_downloaded_audio(folder: str) -> Path | None:
-    directory = Path(folder)
-
+def find_downloaded_audio(folder: str):
     allowed_extensions = {
         ".m4a",
         ".mp4",
@@ -92,127 +40,24 @@ def find_downloaded_audio(folder: str) -> Path | None:
         ".ogg",
     }
 
-    candidates = [
-        file
-        for file in directory.iterdir()
-        if file.is_file()
-        and file.suffix.lower() in allowed_extensions
+    files = [
+        f for f in Path(folder).iterdir()
+        if f.is_file() and f.suffix.lower() in allowed_extensions
     ]
 
-    if not candidates:
+    if not files:
         return None
 
-    # În caz că yt-dlp creează mai multe fișiere,
-    # îl luăm pe cel mai mare.
-    candidates.sort(
+    files.sort(
         key=lambda f: f.stat().st_size,
         reverse=True,
     )
 
-    return candidates[0]
+    return files[0]
 
-
-def download_with_ytdlp(video_id: str, temp_dir: str):
-    video_url = f"https://www.youtube.com/watch?v={video_id}"
-
-    output_template = os.path.join(
-        temp_dir,
-        "%(id)s.%(ext)s",
-    )
-
-    ydl_opts = {
-        "format": (
-            "bestaudio[ext=m4a]/"
-            "bestaudio[ext=mp4]/"
-            "bestaudio/best"
-        ),
-        "outtmpl": output_template,
-        "noplaylist": True,
-
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["mweb"],
-            }
-        },
-
-        "retries": 5,
-        "fragment_retries": 5,
-        "extractor_retries": 3,
-        "socket_timeout": 30,
-        "concurrent_fragment_downloads": 1,
-
-        "writesubtitles": False,
-        "writeautomaticsub": False,
-        "writethumbnail": False,
-        "writeinfojson": False,
-
-        "continuedl": True,
-        "quiet": False,
-        "no_warnings": False,
-        "overwrites": True,
-        "max_filesize": MAX_FILE_SIZE,
-
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 14) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/127.0 Mobile Safari/537.36"
-            )
-        },
-    }
-
-    started = time.time()
-
-    print(f"[DOWNLOAD] START {video_id}")
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(
-            video_url,
-            download=True,
-        )
-
-    elapsed = time.time() - started
-
-    print(
-        f"[DOWNLOAD] yt-dlp finished {video_id} "
-        f"in {elapsed:.1f}s"
-    )
-
-    audio_file = find_downloaded_audio(temp_dir)
-
-    if audio_file is None:
-        raise RuntimeError(
-            "yt-dlp finished but no audio file was found."
-        )
-
-    size = audio_file.stat().st_size
-
-    if size <= 50_000:
-        raise RuntimeError(
-            "Downloaded audio file is unexpectedly small."
-        )
-
-    if size > MAX_FILE_SIZE:
-        raise RuntimeError(
-            "Downloaded audio exceeds maximum allowed size."
-        )
-
-    title = info.get("title") or video_id
-
-    return {
-        "path": audio_file,
-        "title": title,
-        "size": size,
-        "ext": audio_file.suffix.lower(),
-    }
-
-
-# ------------------------------------------------------------------
-# ROUTES
-# ------------------------------------------------------------------
 
 @app.get("/")
-async def root():
+def root():
     return {
         "status": "ok",
         "service": "MusicSync API",
@@ -221,24 +66,34 @@ async def root():
 
 
 @app.get("/health")
-async def health():
+def health():
+    provider_ok = False
+    provider_version = None
+
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:4416/ping",
+            timeout=5,
+        ) as response:
+            data = json.loads(response.read().decode())
+
+            provider_ok = True
+            provider_version = data.get("version")
+
+    except Exception as e:
+        print(f"[PO TOKEN HEALTH ERROR] {e}")
+
     return {
         "status": "healthy",
         "service": "MusicSync API",
         "yt_dlp_version": yt_dlp.version.__version__,
+        "po_token_provider": provider_ok,
+        "po_token_provider_version": provider_version,
     }
 
 
 @app.get("/download/{video_id}")
-async def download(
-    video_id: str,
-    x_musicsync_key: str | None = Header(
-        default=None,
-        alias="X-MusicSync-Key",
-    ),
-):
-    verify_api_key(x_musicsync_key)
-
+def download(video_id: str):
     video_id = video_id.strip()
 
     if not VIDEO_ID_PATTERN.fullmatch(video_id):
@@ -251,26 +106,90 @@ async def download(
         prefix=f"musicsync_{video_id}_"
     )
 
-    print(f"[REQUEST] {video_id}")
+    output_template = os.path.join(
+        temp_dir,
+        "%(id)s.%(ext)s"
+    )
+
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    ydl_opts = {
+        "format": (
+            "bestaudio[ext=m4a]/"
+            "bestaudio[ext=mp4]/"
+            "bestaudio/best"
+        ),
+
+        "outtmpl": output_template,
+        "noplaylist": True,
+
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["mweb"],
+            },
+            "youtubepot-bgutilhttp": {
+                "base_url": ["http://127.0.0.1:4416"],
+            },
+        },
+
+        "retries": 5,
+        "fragment_retries": 5,
+        "extractor_retries": 3,
+        "socket_timeout": 30,
+
+        "concurrent_fragment_downloads": 1,
+        "continuedl": True,
+
+        "writesubtitles": False,
+        "writeautomaticsub": False,
+        "writethumbnail": False,
+        "writeinfojson": False,
+
+        "quiet": False,
+        "no_warnings": False,
+        "overwrites": True,
+
+        "max_filesize": MAX_FILE_SIZE,
+
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 14) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/127.0 Mobile Safari/537.36"
+            )
+        },
+    }
 
     try:
-        async with download_semaphore:
+        print(f"[DOWNLOAD START] {video_id}")
 
-            # yt-dlp este blocking.
-            # Îl mutăm într-un worker thread ca să nu blocăm FastAPI.
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    download_with_ytdlp,
-                    video_id,
-                    temp_dir,
-                ),
-                timeout=180,
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(
+                video_url,
+                download=True,
             )
 
-        audio_path: Path = result["path"]
-        title = result["title"]
+        downloaded_file = find_downloaded_audio(temp_dir)
 
-        extension = result["ext"]
+        if downloaded_file is None:
+            cleanup_directory(temp_dir)
+
+            raise HTTPException(
+                status_code=500,
+                detail="yt-dlp nu a creat niciun fișier audio.",
+            )
+
+        file_size = downloaded_file.stat().st_size
+
+        if file_size < 50000:
+            cleanup_directory(temp_dir)
+
+            raise HTTPException(
+                status_code=500,
+                detail="Fișierul audio rezultat este prea mic.",
+            )
+
+        extension = downloaded_file.suffix.lower()
 
         media_types = {
             ".m4a": "audio/mp4",
@@ -288,70 +207,44 @@ async def download(
         )
 
         print(
-            f"[SUCCESS] {video_id} "
-            f"{result['size']} bytes "
+            f"[DOWNLOAD SUCCESS] {video_id} "
+            f"{file_size} bytes "
             f"{extension}"
         )
 
         return FileResponse(
-            path=str(audio_path),
+            path=str(downloaded_file),
             media_type=media_type,
             filename=f"{video_id}{extension}",
             headers={
                 "X-MusicSync-Video-Id": video_id,
-                "X-MusicSync-Title": title.encode(
-                    "ascii",
-                    "ignore",
-                ).decode(),
                 "X-MusicSync-Extension": extension.lstrip("."),
             },
-
-            # CRITIC:
-            # Fișierul temporar este șters DUPĂ ce Render
-            # termină de trimis răspunsul către telefon.
             background=BackgroundTask(
                 cleanup_directory,
                 temp_dir,
             ),
         )
 
-    except asyncio.TimeoutError:
-
+    except yt_dlp.utils.DownloadError as e:
         cleanup_directory(temp_dir)
 
-        print(f"[TIMEOUT] {video_id}")
-
-        raise HTTPException(
-            status_code=504,
-            detail="YouTube extraction timed out.",
-        )
-
-    except yt_dlp.utils.DownloadError as exc:
-
-        cleanup_directory(temp_dir)
-
-        message = str(exc)
-
-        print(
-            f"[YT-DLP ERROR] {video_id}: "
-            f"{message}"
-        )
+        print(f"[YT-DLP ERROR] {video_id}: {e}")
 
         raise HTTPException(
             status_code=502,
-            detail=f"yt-dlp: {message}",
+            detail=str(e),
         )
 
-    except Exception as exc:
+    except HTTPException:
+        raise
 
+    except Exception as e:
         cleanup_directory(temp_dir)
 
-        print(
-            f"[SERVER ERROR] {video_id}: "
-            f"{exc}"
-        )
+        print(f"[SERVER ERROR] {video_id}: {e}")
 
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail=str(e),
         )
