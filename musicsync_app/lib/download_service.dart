@@ -7,6 +7,7 @@ import 'package:googleapis/youtube/v3.dart' as youtube;
 import 'package:path/path.dart' as p;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 
 // ── Structuri de date de sprijin ──────────────────────────────────────────
@@ -86,8 +87,20 @@ class DownloadSyncService {
     cancelDownload();
   }
 
+  Future<bool> _ensureAndroidStoragePermission() async {
+    if (!Platform.isAndroid) return true;
+    if (await Permission.manageExternalStorage.isGranted) return true;
+
+    final status = await Permission.manageExternalStorage.request();
+    return status.isGranted;
+  }
+
   Future<String?> selectOutputDirectory() async {
     if (Platform.isAndroid) {
+      if (!await _ensureAndroidStoragePermission()) {
+        return null;
+      }
+
       final directory = Directory('/storage/emulated/0/Music/MusicSync');
       if (!await directory.exists()) {
         await directory.create(recursive: true);
@@ -112,6 +125,19 @@ class DownloadSyncService {
     required Function(DownloadProgressInfo) onProgress,
   }) async {
     _isCancelled = false;
+
+    if (!await _ensureAndroidStoragePermission()) {
+      return DownloadResult(
+        isCancelled: false,
+        successCount: 0,
+        skippedCount: 0,
+        failedSongs: [
+          'Permisiune de stocare lipsă. Activează "Acces la toate '
+              'fișierele" pentru MusicSync din Setări și încearcă din nou.',
+        ],
+      );
+    }
+
     _httpClient = HttpClient();
     // Tăiem orice verificare restrictivă de certificate
     _httpClient!.badCertificateCallback = (cert, host, port) => true;

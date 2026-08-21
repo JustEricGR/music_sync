@@ -6,8 +6,7 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
-import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
@@ -21,7 +20,6 @@ app = FastAPI(
 #fixed
 VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
 MAX_FILE_SIZE = 100 * 1024 * 1024
-BGUTIL_LOCAL_URL = "http://127.0.0.1:4416"
 
 
 def cleanup_directory(path: str):
@@ -92,46 +90,6 @@ def health():
         "po_token_provider": provider_ok,
         "po_token_provider_version": provider_version,
     }
-
-
-@app.api_route("/pot/{path:path}", methods=["GET", "POST"])
-async def pot_proxy(path: str, request: Request):
-    """
-    Expune local bgutil-ytdlp-pot-provider (127.0.0.1:4416) public,
-    ca yt-dlp de pe telefon să poată cere PO tokenuri fără să rulăm
-    Node.js pe device. Doar tokenul trece prin Render — extragerea
-    și descărcarea video se fac direct de pe telefon.
-    """
-    target_url = f"{BGUTIL_LOCAL_URL}/{path}"
-    body = await request.body()
-
-    forwarded_headers = {
-        key: value
-        for key, value in request.headers.items()
-        if key.lower() not in ("host", "content-length")
-    }
-
-    try:
-        async with httpx.AsyncClient() as client:
-            upstream = await client.request(
-                request.method,
-                target_url,
-                params=request.query_params,
-                content=body,
-                headers=forwarded_headers,
-                timeout=30.0,
-            )
-    except httpx.RequestError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"bgutil provider unreachable: {e}",
-        )
-
-    return Response(
-        content=upstream.content,
-        status_code=upstream.status_code,
-        media_type=upstream.headers.get("content-type"),
-    )
 
 
 @app.get("/download/{video_id}")

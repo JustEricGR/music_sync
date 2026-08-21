@@ -7,12 +7,6 @@ os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
 import yt_dlp
 
-# bgutil-ytdlp-pot-provider rulează pe serverul Render (are nevoie de
-# Node.js, pe care telefonul nu îl are). Telefonul face extragerea +
-# descărcarea efectivă (IP rezidențial/mobil, nu e blocat de verificarea
-# anti-bot a YouTube), dar cere PO tokenul de la Render prin acest proxy.
-BGUTIL_BASE_URL = "https://music-sync-efl7.onrender.com/pot"
-
 
 def download_audio(video_id, output_path):
     """
@@ -49,23 +43,14 @@ def download_audio(video_id, output_path):
 
             "noplaylist": True,
 
-            # mweb + PO token furnizat de bgutil (via proxy Render) —
-            # android_vr nu mai funcționează fără PO token (403).
+            # visionos e client nativ (nu are nevoie de motor JS pentru
+            # semnături) și, spre deosebire de android/android_vr/ios,
+            # nu cere deloc PO token pentru HTTPS/DASH/HLS — nu avem
+            # nevoie de niciun provider PO token pentru el.
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["mweb"],
+                    "player_client": ["visionos"],
                 },
-                "youtubepot-bgutilhttp": {
-                    "base_url": [BGUTIL_BASE_URL],
-                },
-            },
-
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (Linux; Android 14) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/127.0 Mobile Safari/537.36"
-                )
             },
 
             "retries": 5,

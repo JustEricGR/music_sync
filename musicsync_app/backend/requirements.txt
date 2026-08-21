@@ -2,4 +2,3 @@ fastapi
 uvicorn[standard]
 yt-dlp
 bgutil-ytdlp-pot-provider
-httpx
