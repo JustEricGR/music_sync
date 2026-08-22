@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:googleapis/youtube/v3.dart' as youtube;
@@ -13,6 +14,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:provider/provider.dart';
+import 'package:path_provider/path_provider.dart';
 import 'dart:math';
 
 // Importurile tale de teme și widget-uri
@@ -20,6 +22,7 @@ import 'themes/theme_provider.dart';
 import 'themes/app_themes.dart';
 import 'widgets/dynamic_player.dart';
 import 'download_service.dart';
+import 'playlist_manifest.dart';
 
 // ==========================================
 // ENUMERATIONS
@@ -32,7 +35,7 @@ enum SongMood {
   party,
 }
 
-enum SongSortOrder { oldestFirst, newestFirst }
+enum SongSortOrder { oldestFirst, newestFirst, custom }
 
 // ==========================================
 // METADATA PARSER
@@ -139,6 +142,24 @@ class GlobalAudioState extends ChangeNotifier {
   factory GlobalAudioState() => instance;
   GlobalAudioState._internal() {
     _initListeners();
+    // Sincronizare imediată din player: dacă acest singleton e reconstruit
+    // (de ex. Activity-ul Android a fost recreat) în timp ce serviciul de
+    // redare în fundal era deja activ, câmpurile de mai sus altfel ar
+    // rămâne la valorile implicite (poziție 0 etc.) până la următorul
+    // eveniment din stream — ceea ce arăta "cântă de la început" în UI deși
+    // redarea efectivă continua corect de unde rămăsese.
+    _syncFromPlayer();
+  }
+
+  void _syncFromPlayer() {
+    position = audioPlayer.position;
+    duration = audioPlayer.duration ?? Duration.zero;
+    isPlaying = audioPlayer.playing;
+
+    final seqState = audioPlayer.sequenceState;
+    if (seqState != null && seqState.currentIndex >= 0) {
+      currentIndex = seqState.currentIndex;
+    }
   }
 
   final AudioPlayer audioPlayer = AudioPlayer();
@@ -186,6 +207,33 @@ class GlobalAudioState extends ChangeNotifier {
     });
   }
 
+  Uri? _artUriCache;
+
+  /// Extrage assetul Flutter `assets/yugoslavia.jpg` într-un fișier real pe
+  /// disc și întoarce un URI `file://` către el. Notificarea de redare
+  /// Android (audio_service) NU poate rezolva scheme `asset:///` — acelea
+  /// sunt înțelese doar de widget-urile Flutter, nu de codul nativ care
+  /// încarcă imaginea pentru notificare/lock screen; are nevoie fie de
+  /// `content://`, fie de un fișier real (`file://`), altfel imaginea nu
+  /// apare deloc (eșuează silențios).
+  Future<Uri> _resolveArtUri() async {
+    if (_artUriCache != null) return _artUriCache!;
+
+    final byteData = await rootBundle.load('assets/yugoslavia.jpg');
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}${Platform.pathSeparator}notification_art_yugoslavia.jpg');
+
+    if (!await file.exists()) {
+      await file.writeAsBytes(
+        byteData.buffer.asUint8List(byteData.offsetInBytes, byteData.lengthInBytes),
+        flush: true,
+      );
+    }
+
+    _artUriCache = Uri.file(file.path);
+    return _artUriCache!;
+  }
+
   Future<void> loadPlaylist(LocalPlaylistModel playlistModel, int initialIndex) async {
     playlistFiles = List.from(playlistModel.audioFiles);
     currentIndex = initialIndex;
@@ -199,11 +247,13 @@ class GlobalAudioState extends ChangeNotifier {
   Future<void> playSongAtIndex(int index) async {
     if (index < 0 || index >= playlistFiles.length) return;
     currentIndex = index;
-    
+
+    final artUri = await _resolveArtUri();
+
     final audioSources = playlistFiles.map((file) {
       final fileName = file.path.split(Platform.pathSeparator).last;
       final meta = parseArtistAndTitle(fileName);
-      
+
       return AudioSource.file(
         file.path,
         tag: MediaItem(
@@ -211,7 +261,7 @@ class GlobalAudioState extends ChangeNotifier {
           title: meta.title,
           artist: meta.artist,
           album: currentPlaylistTitle ?? '',
-          artUri: Uri.parse('asset:///assets/yugoslavia.jpg'),
+          artUri: artUri,
         ),
       );
     }).toList();
@@ -244,6 +294,63 @@ class GlobalAudioState extends ChangeNotifier {
     await playSongAtIndex(currentIndex > 0 ? currentIndex - 1 : playlistFiles.length - 1);
   }
 
+  /// Recompune sursa audio după o editare locală (elimină/reordonare) care
+  /// afectează playlistul curent încărcat, păstrând poziția și starea de
+  /// redare — spre deosebire de loadPlaylist/playSongAtIndex, care mereu
+  /// repornesc de la 0. Dacă playlistul editat nu e cel încărcat acum, nu
+  /// face nimic (nu există stare de sincronizat).
+  Future<void> reconcileAfterLocalEdit({
+    required String playlistTitle,
+    required List<File> newFiles,
+    String? keepPlayingPath,
+  }) async {
+    if (currentPlaylistTitle != playlistTitle) return;
+
+    if (newFiles.isEmpty) {
+      await stop();
+      return;
+    }
+
+    final wasPlaying = isPlaying;
+    final resumePosition = position;
+
+    playlistFiles = List.from(newFiles);
+    final idx = keepPlayingPath == null ? -1 : playlistFiles.indexWhere((f) => f.path == keepPlayingPath);
+    currentIndex = (idx >= 0 ? idx : 0).clamp(0, playlistFiles.length - 1);
+
+    final artUri = await _resolveArtUri();
+
+    final audioSources = playlistFiles.map((file) {
+      final fileName = file.path.split(Platform.pathSeparator).last;
+      final meta = parseArtistAndTitle(fileName);
+
+      return AudioSource.file(
+        file.path,
+        tag: MediaItem(
+          id: file.path,
+          title: meta.title,
+          artist: meta.artist,
+          album: currentPlaylistTitle ?? '',
+          artUri: artUri,
+        ),
+      );
+    }).toList();
+
+    await audioPlayer.setAudioSource(
+      ConcatenatingAudioSource(children: audioSources),
+      initialIndex: currentIndex,
+      initialPosition: idx >= 0 ? resumePosition : Duration.zero,
+    );
+
+    if (wasPlaying) {
+      await audioPlayer.play();
+    } else {
+      await audioPlayer.pause();
+    }
+
+    notifyListeners();
+  }
+
   Future<void> stop() async {
     await audioPlayer.stop();
     playlistFiles.clear();
@@ -266,7 +373,7 @@ void main() async {
     androidNotificationChannelName: 'MusicSync Player',
     androidNotificationOngoing: true,
     androidStopForegroundOnPause: true,
-    androidNotificationIcon: 'mipmap/ic_launcher',
+    androidNotificationIcon: 'drawable/ic_notification_star',
   );
 
   try {
@@ -852,7 +959,8 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
       for (var entity in entities) {
         if (entity is Directory) {
           final folderName = entity.path.split(Platform.pathSeparator).last;
-          
+          if (folderName.toLowerCase() == kRemovedSongsFolderName.toLowerCase()) continue;
+
           final files = entity.listSync().whereType<File>().where((f) {
             final ext = f.path.toLowerCase();
             return ext.endsWith('.mp3') || ext.endsWith('.m4a') || ext.endsWith('.wav');
@@ -1031,9 +1139,10 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
   
   List<File> _allFiles = [];
   List<File> _displayedFiles = [];
+  List<File> _customOrderFiles = [];
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = "";
-  
+
   // Aici vom salva imaginea aleasă random la deschiderea ecranului
   String? _randomBackgroundImage;
 
@@ -1042,7 +1151,39 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
     super.initState();
     _allFiles = List.from(widget.playlist.audioFiles);
     _applySortingAndFiltering(shouldLoadPlaylist: true);
+    _loadCustomOrder();
     _pickRandomImage();
+  }
+
+  Future<void> _loadCustomOrder() async {
+    final entries = await PlaylistManifest.getOrderedSongs(widget.playlist.directory);
+
+    final byName = {
+      for (final f in _allFiles) f.path.split(Platform.pathSeparator).last: f,
+    };
+
+    final ordered = <File>[];
+    for (final entry in entries) {
+      final file = byName[entry.fileName];
+      if (file != null) ordered.add(file);
+    }
+
+    // Orice fișier de pe disc absent din manifest (rar — doar dacă
+    // reconcilierea încă nu a rulat) e adăugat la final, ca să nu dispară
+    // pur și simplu din listă.
+    final orderedNames = ordered.map((f) => f.path.split(Platform.pathSeparator).last).toSet();
+    for (final f in _allFiles) {
+      final name = f.path.split(Platform.pathSeparator).last;
+      if (!orderedNames.contains(name)) ordered.add(f);
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _customOrderFiles = ordered;
+    });
+    if (_sortOrder == SongSortOrder.custom) {
+      _applySortingAndFiltering();
+    }
   }
 
   void _pickRandomImage() {
@@ -1097,16 +1238,20 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
   }
 
   void _applySortingAndFiltering({bool shouldLoadPlaylist = false}) {
-    List<File> filtered = _allFiles.where((file) {
+    final baseList = _sortOrder == SongSortOrder.custom ? _customOrderFiles : _allFiles;
+
+    List<File> filtered = baseList.where((file) {
       final fileName = file.path.split(Platform.pathSeparator).last.toLowerCase();
       return fileName.contains(_searchQuery.toLowerCase());
     }).toList();
 
-    filtered.sort((a, b) {
-      final modA = a.lastModifiedSync();
-      final modB = b.lastModifiedSync();
-      return _sortOrder == SongSortOrder.oldestFirst ? modA.compareTo(modB) : modB.compareTo(modA);
-    });
+    if (_sortOrder != SongSortOrder.custom) {
+      filtered.sort((a, b) {
+        final modA = a.lastModifiedSync();
+        final modB = b.lastModifiedSync();
+        return _sortOrder == SongSortOrder.oldestFirst ? modA.compareTo(modB) : modB.compareTo(modA);
+      });
+    }
 
     setState(() {
       _displayedFiles = filtered;
@@ -1123,9 +1268,130 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
     }
   }
 
+  IconData _sortIcon() {
+    switch (_sortOrder) {
+      case SongSortOrder.oldestFirst:
+        return Icons.sort_by_alpha;
+      case SongSortOrder.newestFirst:
+        return Icons.swap_vert;
+      case SongSortOrder.custom:
+        return Icons.reorder;
+    }
+  }
+
+  String _sortTooltip() {
+    switch (_sortOrder) {
+      case SongSortOrder.oldestFirst:
+        return "Sortează: Cele mai Noi Primele";
+      case SongSortOrder.newestFirst:
+        return "Sortează: Ordine Personalizată";
+      case SongSortOrder.custom:
+        return "Sortează: Cele mai Vechi Primele";
+    }
+  }
+
+  Future<void> _confirmRemoveSong(File file) async {
+    final fileName = file.path.split(Platform.pathSeparator).last;
+    final meta = parseArtistAndTitle(fileName);
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Elimină melodia?'),
+        content: Text(
+          '"${meta.title}" va fi mutată în folderul "Removed Songs" '
+          '(nu este ștearsă definitiv).',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Anulează'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Elimină'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    final isLoadedHere = audioState.currentPlaylistTitle == widget.playlist.title;
+    final currentlyPlayingPath = isLoadedHere &&
+            audioState.playlistFiles.isNotEmpty &&
+            audioState.currentIndex < audioState.playlistFiles.length
+        ? audioState.playlistFiles[audioState.currentIndex].path
+        : null;
+    final wasCurrentlyPlaying = currentlyPlayingPath == file.path;
+
+    try {
+      await PlaylistManifest.moveToRemovedSongs(
+        rootDir: widget.playlist.directory.parent,
+        source: file,
+        sourcePlaylistFolderName: widget.playlist.title,
+      );
+      await PlaylistManifest.removeByFileName(widget.playlist.directory, fileName);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Nu am putut elimina melodia: $e')),
+        );
+      }
+      return;
+    }
+
+    setState(() {
+      _allFiles.removeWhere((f) => f.path == file.path);
+      _customOrderFiles.removeWhere((f) => f.path == file.path);
+    });
+    _applySortingAndFiltering();
+
+    await audioState.reconcileAfterLocalEdit(
+      playlistTitle: widget.playlist.title,
+      newFiles: _displayedFiles,
+      keepPlayingPath: wasCurrentlyPlaying ? null : currentlyPlayingPath,
+    );
+  }
+
+  Future<void> _handleReorder(int oldIndex, int newIndex) async {
+    if (oldIndex == newIndex) return;
+
+    final isLoadedHere = audioState.currentPlaylistTitle == widget.playlist.title;
+    final currentlyPlayingPath = isLoadedHere &&
+            audioState.playlistFiles.isNotEmpty &&
+            audioState.currentIndex < audioState.playlistFiles.length
+        ? audioState.playlistFiles[audioState.currentIndex].path
+        : null;
+
+    setState(() {
+      final file = _displayedFiles.removeAt(oldIndex);
+      _displayedFiles.insert(newIndex, file);
+      _customOrderFiles = List.from(_displayedFiles);
+    });
+
+    await PlaylistManifest.reorder(widget.playlist.directory, oldIndex, newIndex);
+
+    await audioState.reconcileAfterLocalEdit(
+      playlistTitle: widget.playlist.title,
+      newFiles: _displayedFiles,
+      keepPlayingPath: currentlyPlayingPath,
+    );
+  }
+
   void _toggleSortOrder() {
     setState(() {
-      _sortOrder = _sortOrder == SongSortOrder.oldestFirst ? SongSortOrder.newestFirst : SongSortOrder.oldestFirst;
+      switch (_sortOrder) {
+        case SongSortOrder.oldestFirst:
+          _sortOrder = SongSortOrder.newestFirst;
+          break;
+        case SongSortOrder.newestFirst:
+          _sortOrder = SongSortOrder.custom;
+          break;
+        case SongSortOrder.custom:
+          _sortOrder = SongSortOrder.oldestFirst;
+          break;
+      }
     });
     _applySortingAndFiltering();
   }
@@ -1134,6 +1400,59 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
     final minutes = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final seconds = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return "$minutes:$seconds";
+  }
+
+  Widget _buildSongTile({
+    required int idx,
+    required File file,
+    required PlayerColors moodColors,
+    required Key key,
+    required Widget trailing,
+  }) {
+    final fileName = file.path.split(Platform.pathSeparator).last;
+    final meta = parseArtistAndTitle(fileName);
+
+    final isSelected = audioState.playlistFiles.isNotEmpty &&
+        audioState.currentIndex < audioState.playlistFiles.length &&
+        audioState.playlistFiles[audioState.currentIndex].path == file.path &&
+        audioState.currentPlaylistTitle == widget.playlist.title;
+
+    return ListTile(
+      key: key,
+      // Folosim tileColor dinamic integrat cu poza de fundal
+      tileColor: isSelected
+          ? moodColors.accentColor.withOpacity(0.18)
+          : Colors.white.withOpacity(0.02),
+      dense: true,
+      leading: isSelected
+          ? Icon(Icons.graphic_eq, color: moodColors.accentColor)
+          : Text("${idx + 1}", style: const TextStyle(color: Colors.white60, fontSize: 11)),
+      title: Text(
+        meta.title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+          color: isSelected ? moodColors.accentColor : Colors.white,
+        ),
+      ),
+      subtitle: Text(
+        meta.artist,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 11, color: isSelected ? moodColors.accentColor.withOpacity(0.8) : Colors.white54),
+      ),
+      trailing: trailing,
+      onTap: () {
+        final updatedModel = LocalPlaylistModel(
+          title: widget.playlist.title,
+          directory: widget.playlist.directory,
+          audioFiles: _displayedFiles,
+          totalYoutubeCount: widget.playlist.totalYoutubeCount,
+        );
+        audioState.loadPlaylist(updatedModel, idx);
+      },
+    );
   }
 
   @override
@@ -1162,8 +1481,8 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
         ),
         actions: [
           IconButton(
-            icon: Icon(_sortOrder == SongSortOrder.oldestFirst ? Icons.sort_by_alpha : Icons.swap_vert, color: Colors.white),
-            tooltip: _sortOrder == SongSortOrder.oldestFirst ? "Sortează: Cele mai Noi Primele" : "Sortează: Cele mai Vechi Primele",
+            icon: Icon(_sortIcon(), color: Colors.white),
+            tooltip: _sortTooltip(),
             onPressed: _toggleSortOrder,
           ),
         ],
@@ -1346,55 +1665,57 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
                         ),
                         child: _displayedFiles.isEmpty
                             ? const Center(child: Text("Nu s-a găsit nicio melodie.", style: TextStyle(color: Colors.white70)))
-                            : ListView.builder(
-                                padding: const EdgeInsets.only(top: 12, bottom: 16),
-                                itemCount: _displayedFiles.length,
-                                itemBuilder: (context, idx) {
-                                  final file = _displayedFiles[idx];
-                                  final fileName = file.path.split(Platform.pathSeparator).last;
-                                  final meta = parseArtistAndTitle(fileName);
-                                  
-                                  final isSelected = audioState.playlistFiles.isNotEmpty &&
-                                      audioState.currentIndex < audioState.playlistFiles.length &&
-                                      audioState.playlistFiles[audioState.currentIndex].path == file.path &&
-                                      audioState.currentPlaylistTitle == widget.playlist.title;
-
-                                  return ListTile(
-                                    // Folosim tileColor dinamic integrat cu poza de fundal
-                                    tileColor: isSelected 
-                                        ? moodColors.accentColor.withOpacity(0.18) 
-                                        : Colors.white.withOpacity(0.02),
-                                    dense: true,
-                                    leading: isSelected
-                                        ? Icon(Icons.graphic_eq, color: moodColors.accentColor)
-                                        : Text("${idx + 1}", style: const TextStyle(color: Colors.white60, fontSize: 11)),
-                                    title: Text(
-                                      meta.title,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                                        color: isSelected ? moodColors.accentColor : Colors.white,
-                                      ),
-                                    ),
-                                    subtitle: Text(
-                                      meta.artist,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(fontSize: 11, color: isSelected ? moodColors.accentColor.withOpacity(0.8) : Colors.white54),
-                                    ),
-                                    onTap: () {
-                                      final updatedModel = LocalPlaylistModel(
-                                        title: widget.playlist.title,
-                                        directory: widget.playlist.directory,
-                                        audioFiles: _displayedFiles,
-                                        totalYoutubeCount: widget.playlist.totalYoutubeCount,
+                            : (_sortOrder == SongSortOrder.custom && _searchQuery.isEmpty)
+                                ? ReorderableListView.builder(
+                                    padding: const EdgeInsets.only(top: 12, bottom: 16),
+                                    buildDefaultDragHandles: false,
+                                    itemCount: _displayedFiles.length,
+                                    onReorderItem: _handleReorder,
+                                    itemBuilder: (context, idx) {
+                                      final file = _displayedFiles[idx];
+                                      return _buildSongTile(
+                                        idx: idx,
+                                        file: file,
+                                        moodColors: moodColors,
+                                        key: ValueKey(file.path),
+                                        trailing: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            IconButton(
+                                              icon: const Icon(Icons.remove_circle_outline, color: Colors.white54, size: 20),
+                                              tooltip: 'Elimină din playlist',
+                                              onPressed: () => _confirmRemoveSong(file),
+                                            ),
+                                            ReorderableDragStartListener(
+                                              index: idx,
+                                              child: const Padding(
+                                                padding: EdgeInsets.only(left: 4),
+                                                child: Icon(Icons.drag_handle, color: Colors.white38, size: 20),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
                                       );
-                                      audioState.loadPlaylist(updatedModel, idx);
                                     },
-                                  );
-                                },
-                              ),
+                                  )
+                                : ListView.builder(
+                                    padding: const EdgeInsets.only(top: 12, bottom: 16),
+                                    itemCount: _displayedFiles.length,
+                                    itemBuilder: (context, idx) {
+                                      final file = _displayedFiles[idx];
+                                      return _buildSongTile(
+                                        idx: idx,
+                                        file: file,
+                                        moodColors: moodColors,
+                                        key: ValueKey(file.path),
+                                        trailing: IconButton(
+                                          icon: const Icon(Icons.remove_circle_outline, color: Colors.white54, size: 20),
+                                          tooltip: 'Elimină din playlist',
+                                          onPressed: () => _confirmRemoveSong(file),
+                                        ),
+                                      );
+                                    },
+                                  ),
                       ),
                     ),
                   ],

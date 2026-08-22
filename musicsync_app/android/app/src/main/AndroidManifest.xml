@@ -21,7 +21,7 @@
 
 
     <application
-        android:label="musicsync_app"
+        android:label="MusicSync"
         android:name="${applicationName}"
         android:icon="@mipmap/launcher_icon"
         android:usesCleartextTraffic="true"> 

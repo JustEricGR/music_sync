@@ -75,6 +75,14 @@ set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
 
+# Descărcarea pe Windows apelează yt-dlp.exe printr-o cale relativă (vezi
+# _getYtDlpPathWindows în download_service.dart), care funcționează la
+# `flutter run` doar pentru că directorul de lucru e rădăcina proiectului.
+# Îl copiem explicit lângă executabil, ca și un build lansat din afara
+# proiectului (ex. flutter build windows --release) să îl găsească.
+install(FILES "${CMAKE_SOURCE_DIR}/../yt-dlp.exe" DESTINATION "${CMAKE_INSTALL_PREFIX}"
+  COMPONENT Runtime)
+
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
 

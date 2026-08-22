@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'playlist_manifest.dart';
 
 
 // ── Structuri de date de sprijin ──────────────────────────────────────────
@@ -148,6 +149,13 @@ class DownloadSyncService {
       await playlistFolder.create(recursive: true);
     }
 
+    // Melodii deja descărcate în ALTE playlisturi — le copiem în loc să le
+    // redescărcăm prin yt-dlp.
+    final crossPlaylistIndex = await PlaylistManifest.buildCrossPlaylistIndex(
+      rootDir: Directory(targetDirectoryPath),
+      excludeFolder: playlistFolder,
+    );
+
     int successCount = 0;
     int skippedCount = 0;
     List<String> failedSongs = [];
@@ -174,8 +182,24 @@ class DownloadSyncService {
       final targetM4a = File(p.join(playlistFolder.path, '$safeSongTitle.m4a'));
       final targetMp3 = File(p.join(playlistFolder.path, '$safeSongTitle.mp3'));
 
-      // Check dacă există deja
-      if (await targetM4a.exists() || await targetMp3.exists()) {
+      // Check dacă există deja — întâi prin manifest (după videoId, robust
+      // la titluri modificate), apoi fallback pe verificarea veche a căii
+      // (compatibilitate cu fișiere descărcate înainte de manifest).
+      final existingSongs = await PlaylistManifest.getOrderedSongs(playlistFolder);
+      final alreadyTracked = existingSongs.any((s) => s.videoId == videoId);
+      final alreadyOnDiskLegacy = !alreadyTracked && (await targetM4a.exists() || await targetMp3.exists());
+
+      if (alreadyOnDiskLegacy) {
+        final legacyFile = await targetM4a.exists() ? targetM4a : targetMp3;
+        await PlaylistManifest.insertSong(playlistFolder, PlaylistSongEntry(
+          videoId: videoId,
+          fileName: p.basename(legacyFile.path),
+          title: rawTitle,
+          sourceIndex: i,
+        ));
+      }
+
+      if (alreadyTracked || alreadyOnDiskLegacy) {
         skippedCount++;
         debugPrint('[$i/$totalSongs] [SKIP] "$rawTitle" există deja pe disc.');
         onProgress(DownloadProgressInfo(
@@ -204,9 +228,28 @@ class DownloadSyncService {
 
       bool downloadedSuccessfully = false;
       String lastErrorMsg = '';
+      String? savedFilePath;
+
+      // ── COPIERE DIN ALT PLAYLIST (evită redescărcarea) ──────────────────
+      final crossHit = crossPlaylistIndex[videoId];
+      if (crossHit != null) {
+        try {
+          final destPath = p.join(playlistFolder.path, p.basename(crossHit.file.path));
+          final copied = await crossHit.file.copy(destPath);
+          downloadedSuccessfully = true;
+          savedFilePath = copied.path;
+          debugPrint(
+            '[$i/$totalSongs] [COPY] "$rawTitle" copiat din playlistul "${crossHit.playlistFolderName}".',
+          );
+        } catch (e) {
+          // Nu eșuăm melodia doar pentru că fast-path-ul de copiere a
+          // picat — mergem mai departe cu descărcarea normală.
+          debugPrint('[$i/$totalSongs] [COPY FAILED] $e — se încearcă descărcare normală.');
+        }
+      }
 
       // ── PLATFORMA WINDOWS ───────────────────────────────────────────────
-      if (Platform.isWindows) {
+      if (!downloadedSuccessfully && Platform.isWindows) {
         final ytDlpExecutable = _getYtDlpPathWindows();
         final outputFilePath = targetMp3.path;
 
@@ -249,6 +292,7 @@ class DownloadSyncService {
 
           if (exitCode == 0 && await targetMp3.exists()) {
             downloadedSuccessfully = true;
+            savedFilePath = targetMp3.path;
           } else {
             lastErrorMsg = 'yt-dlp error code $exitCode';
           }
@@ -258,7 +302,7 @@ class DownloadSyncService {
           _activeProcessWindows = null;
         }
 
-      } else if (Platform.isAndroid) {
+      } else if (!downloadedSuccessfully && Platform.isAndroid) {
         try {
           onProgress(DownloadProgressInfo(
             currentSongTitle: rawTitle,
@@ -327,6 +371,7 @@ class DownloadSyncService {
           }
 
           downloadedSuccessfully = true;
+          savedFilePath = returnedPath;
 
           debugPrint(
             '[YT-DLP LOCAL SUCCESS] $returnedPath ($size bytes)',
@@ -336,6 +381,15 @@ class DownloadSyncService {
 
           debugPrint('[YT-DLP LOCAL ERROR] $lastErrorMsg');
         }
+      }
+
+      if (downloadedSuccessfully && savedFilePath != null) {
+        await PlaylistManifest.insertSong(playlistFolder, PlaylistSongEntry(
+          videoId: videoId,
+          fileName: p.basename(savedFilePath),
+          title: rawTitle,
+          sourceIndex: i,
+        ));
       }
 
       if (downloadedSuccessfully) {
