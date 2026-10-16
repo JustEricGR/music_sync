@@ -65,6 +65,15 @@ class RecognizedSong {
       );
 }
 
+/// Poziția secvenței "\r\n\r\n" care încheie antetele unui răspuns HTTP/ICY
+/// sau -1 dacă antetele nu au sosit încă complet.
+int parseRawHeaderEnd(List<int> bytes) {
+  for (var i = 0; i + 3 < bytes.length; i++) {
+    if (bytes[i] == 13 && bytes[i + 1] == 10 && bytes[i + 2] == 13 && bytes[i + 3] == 10) return i;
+  }
+  return -1;
+}
+
 class RecognitionException implements Exception {
   final String message;
   RecognitionException(this.message);
@@ -81,18 +90,56 @@ class SongRecognizer {
 
   // ── Cont / token ──────────────────────────────────────────────────────────
 
+  // Tokenul rămâne la actualizări (setările aplicației se păstrează), iar o
+  // copie în folderul de muzică îl recuperează și după o reinstalare.
+  static File? get _tokenBackupFile =>
+      Platform.isAndroid ? File('/storage/emulated/0/Music/MusicSync/.musicsync_audd_token') : null;
+
   static Future<String?> getToken() async {
     final prefs = await SharedPreferences.getInstance();
-    final t = prefs.getString(_kTokenKey);
-    return (t == null || t.isEmpty) ? null : t;
+    final t = prefs.getString(_kTokenKey)?.trim();
+    final backup = _tokenBackupFile;
+    if (t != null && t.isNotEmpty) {
+      // Tokenurile salvate înainte de existența copiei primesc și ele una.
+      try {
+        if (backup != null && !await backup.exists()) {
+          await backup.parent.create(recursive: true);
+          await backup.writeAsString(t, flush: true);
+        }
+      } catch (_) {}
+      return t;
+    }
+    try {
+      if (backup != null && await backup.exists()) {
+        final restored = (await backup.readAsString()).trim();
+        if (restored.isNotEmpty) {
+          await prefs.setString(_kTokenKey, restored);
+          return restored;
+        }
+      }
+    } catch (_) {
+      // Fără acces la stocare — doar tokenul din setări contează.
+    }
+    return null;
   }
 
   static Future<void> setToken(String? token) async {
     final prefs = await SharedPreferences.getInstance();
-    if (token == null || token.isEmpty) {
+    final value = token?.trim() ?? '';
+    final backup = _tokenBackupFile;
+    if (value.isEmpty) {
       await prefs.remove(_kTokenKey);
+      try {
+        if (backup != null && await backup.exists()) await backup.delete();
+      } catch (_) {}
     } else {
-      await prefs.setString(_kTokenKey, token);
+      await prefs.setString(_kTokenKey, value);
+      try {
+        if (backup != null) {
+          await backup.parent.create(recursive: true);
+          await backup.writeAsString(value, flush: true);
+        }
+      } catch (_) {}
     }
   }
 
@@ -151,6 +198,27 @@ class SongRecognizer {
   /// Ia direct ~15 secunde din stream-ul radio (mai exact decât microfonul,
   /// fără zgomot de fundal). Nu merge pentru stream-uri HLS (.m3u8).
   Future<File> captureStream(String streamUrl, {int maxBytes = 260000}) async {
+    Uint8List data;
+    try {
+      data = await _captureHttp(streamUrl, maxBytes);
+    } on RecognitionException {
+      rethrow;
+    } catch (_) {
+      // Servere SHOUTcast vechi răspund "ICY 200 OK" în loc de "HTTP/1.1 200 OK"
+      // și clientul HTTP le respinge ("Invalid response line") — citim direct.
+      data = await _captureRaw(Uri.parse(streamUrl), maxBytes);
+    }
+
+    if (data.length < 40000) {
+      throw RecognitionException('Prea puține date din stream pentru recunoaștere.');
+    }
+    final type = streamUrl.toLowerCase().contains('aac') ? 'aac' : 'mp3';
+    final file = await _tempFile(type);
+    await file.writeAsBytes(data, flush: true);
+    return file;
+  }
+
+  Future<Uint8List> _captureHttp(String streamUrl, int maxBytes) async {
     final client = http.Client();
     final bytes = BytesBuilder(copy: false);
     try {
@@ -175,15 +243,10 @@ class SongRecognizer {
     } finally {
       client.close();
     }
-
-    if (bytes.length < 40000) {
-      throw RecognitionException('Prea puține date din stream pentru recunoaștere.');
-    }
-    final type = streamUrl.toLowerCase().contains('aac') ? 'aac' : 'mp3';
-    final file = await _tempFile(type);
-    await file.writeAsBytes(bytes.takeBytes(), flush: true);
-    return file;
+    return bytes.takeBytes();
   }
+
+  Future<Uint8List> _captureRaw(Uri uri, int maxBytes) => captureRawStream(uri, maxBytes);
 
   // ── Recunoaștere ──────────────────────────────────────────────────────────
 
@@ -224,4 +287,76 @@ class SongRecognizer {
       } catch (_) {}
     }
   }
+}
+
+
+/// Citește stream-ul printr-un socket, acceptând atât "HTTP/1.x 200" cât și
+/// "ICY 200 OK"; urmează redirecționările.
+Future<Uint8List> captureRawStream(Uri uri, int maxBytes, {int redirects = 3}) async {
+  final port = uri.hasPort ? uri.port : (uri.scheme == 'https' ? 443 : 80);
+  const connectTimeout = Duration(seconds: 15);
+  final Socket socket = uri.scheme == 'https'
+      ? await SecureSocket.connect(uri.host, port, timeout: connectTimeout)
+      : await Socket.connect(uri.host, port, timeout: connectTimeout);
+  final path = uri.path.isEmpty ? '/' : uri.path;
+  socket.write('GET ${uri.hasQuery ? '$path?${uri.query}' : path} HTTP/1.0\r\n'
+      'Host: ${uri.host}\r\n'
+      'User-Agent: $kHttpUserAgent\r\n'
+      'Accept: */*\r\n'
+      'Connection: close\r\n\r\n');
+
+  final buffer = BytesBuilder(copy: false);
+  final done = Completer<void>();
+  int? bodyStart;
+  Uri? redirectTo;
+  void fail(Object e) => done.isCompleted ? null : done.completeError(e);
+
+  final sub = socket.listen(
+    (chunk) {
+      buffer.add(chunk);
+      if (bodyStart == null) {
+        final all = buffer.toBytes();
+        final end = parseRawHeaderEnd(all);
+        if (end < 0) {
+          if (all.length > 16384) fail(RecognitionException('Răspuns neașteptat de la stream.'));
+          return;
+        }
+        final head = latin1.decode(all.sublist(0, end));
+        final lines = head.split('\r\n');
+        final code = int.tryParse(lines.first.split(' ').elementAtOrNull(1) ?? '');
+        if (code != null && code >= 300 && code < 400) {
+          final locationLine = lines.firstWhere((l) => l.toLowerCase().startsWith('location:'), orElse: () => '');
+          final location = locationLine.isEmpty ? '' : locationLine.substring('location:'.length).trim();
+          if (location.isNotEmpty) redirectTo = uri.resolve(location);
+          if (!done.isCompleted) done.complete();
+          return;
+        }
+        if (code != 200) {
+          fail(RecognitionException('Stream-ul a răspuns: ${lines.first}'));
+          return;
+        }
+        bodyStart = end + 4;
+      }
+      if (buffer.length - bodyStart! >= maxBytes && !done.isCompleted) done.complete();
+    },
+    onDone: () => done.isCompleted ? null : done.complete(),
+    onError: fail,
+    cancelOnError: true,
+  );
+  try {
+    await done.future.timeout(const Duration(seconds: 25), onTimeout: () {});
+  } finally {
+    await sub.cancel();
+    socket.destroy();
+  }
+
+  final target = redirectTo;
+  if (target != null) {
+    if (redirects <= 0) throw RecognitionException('Prea multe redirecționări ale stream-ului.');
+    return captureRawStream(target, maxBytes, redirects: redirects - 1);
+  }
+  final start = bodyStart;
+  if (start == null) throw RecognitionException('Stream-ul nu a trimis date.');
+  final all = buffer.takeBytes();
+  return start >= all.length ? Uint8List(0) : Uint8List.sublistView(all, start);
 }

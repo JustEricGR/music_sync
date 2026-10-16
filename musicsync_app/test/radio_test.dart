@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:musicsync_app/radio/geo.dart';
 import 'package:musicsync_app/radio/radio_repository.dart';
 import 'package:musicsync_app/radio/radio_station.dart';
+import 'package:musicsync_app/radio/song_recognizer.dart';
 
 RadioStation _station(String name, {double? lat, double? lon, int clicks = 0, int votes = 0, int trend = 0}) =>
     RadioStation(uuid: name, name: name, streamUrl: 'http://x', lat: lat, lon: lon, clickCount: clicks, votes: votes, clickTrend: trend);
@@ -116,5 +117,12 @@ void main() {
       expect(sortStations([near, far, noGeo], StationSort.votes).first.name, 'nogeo');
       expect(sortStations([near, far, noGeo], StationSort.trending).first.name, 'nogeo');
     });
+  });
+
+  test('parseRawHeaderEnd finds the end of HTTP and ICY headers', () {
+    final icy = latin1.encode('ICY 200 OK\r\nicy-name:X\r\n\r\nAUDIO');
+    expect(parseRawHeaderEnd(icy), 22);
+    expect(latin1.decode(icy.sublist(22 + 4)), 'AUDIO');
+    expect(parseRawHeaderEnd(latin1.encode('HTTP/1.0 200 OK\r\nicy-br:128\r\n')), -1);
   });
 }

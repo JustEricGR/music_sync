@@ -343,6 +343,16 @@ class GlobalAudioState extends ChangeNotifier {
     radioStatus = null;
     radioMapContext = mapContext;
 
+    // just_audio_background trimite notificării titlul nou doar când se schimbă
+    // indexul piesei — de la un post la altul e mereu 0, așa că notificarea
+    // rămânea cu postul vechi (ex. Bitola în loc de Ioannina). Oprirea
+    // playerului îl reinițializează și titlul nou ajunge sigur în notificare.
+    final previous = currentRadio;
+    if (previous != null && previous.uuid != station.uuid) {
+      await audioPlayer.stop();
+      if (generation != _radioGeneration) return;
+    }
+
     playlistFiles.clear();
     currentPlaylistTitle = null;
     currentPlaylistModel = null;
