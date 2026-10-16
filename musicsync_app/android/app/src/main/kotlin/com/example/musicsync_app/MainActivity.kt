@@ -51,6 +51,8 @@ class MainActivity : AudioServiceActivity() {
         } catch (_: Exception) {
             // Canalul vechi e încă folosit de serviciul de redare pornit — rămâne până la următoarea pornire.
         }
+        // Notificarea separată pentru ★ dintr-o versiune de test: o singură notificare (playerul) rămâne.
+        nm.deleteNotificationChannel("com.example.musicsync_app.star")
     }
 
     // Ține Wi-Fi-ul treaz cât timp rulează un post de radio — cu ecranul
