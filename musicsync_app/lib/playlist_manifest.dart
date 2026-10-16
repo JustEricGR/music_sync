@@ -51,6 +51,16 @@ class PlaylistSongEntry {
       );
 }
 
+class SourceOrderResult {
+  /// Intrări duplicate scoase din manifest (fișierele trebuie mutate).
+  final List<PlaylistSongEntry> duplicates;
+
+  /// Ordinea melodiilor s-a schimbat.
+  final bool orderChanged;
+
+  const SourceOrderResult(this.duplicates, this.orderChanged);
+}
+
 /// O melodie găsită deja descărcată într-un ALT playlist (folosit pentru
 /// a evita re-descărcarea aceluiași video).
 class CrossPlaylistHit {
@@ -210,6 +220,76 @@ class PlaylistManifest {
         await _save(folder, songs);
         return songs;
       });
+
+  /// Completează videoId-ul intrărilor vechi (fără ID) identificate ulterior
+  /// după titlu: numeFișier -> videoId. Intrările care au deja ID rămân
+  /// neschimbate.
+  static Future<void> assignVideoIds(Directory folder, Map<String, String> videoIdByFileName) =>
+      _withLock(folder.path, () async {
+        final songs = await _loadReconciled(folder);
+        bool changed = false;
+        for (int i = 0; i < songs.length; i++) {
+          final s = songs[i];
+          final id = videoIdByFileName[s.fileName];
+          if (id == null || id.isEmpty || s.videoId.isNotEmpty) continue;
+          songs[i] = PlaylistSongEntry(
+            videoId: id,
+            fileName: s.fileName,
+            title: s.title,
+            sourceIndex: s.sourceIndex,
+          );
+          changed = true;
+        }
+        if (changed) await _save(folder, songs);
+      });
+
+  /// Rescrie ordinea exact ca în playlistul YouTube ([indexByVideoId] =
+  /// poziția curentă a fiecărui video). Melodiile fără poziție cunoscută
+  /// rămân la final, în ordinea lor. Duplicatele (același video de mai multe
+  /// ori) sunt scoase din manifest și întoarse — fișierele lor trebuie
+  /// mutate de apelant.
+  static Future<SourceOrderResult> applySourceOrder(
+    Directory folder,
+    Map<String, int> indexByVideoId, {
+    bool save = true,
+  }) =>
+      _withLock(folder.path, () async {
+        final songs = await _loadReconciled(folder);
+        final seen = <String>{};
+        final duplicates = <PlaylistSongEntry>[];
+        final known = <PlaylistSongEntry>[];
+        final unknown = <PlaylistSongEntry>[];
+
+        for (final s in songs) {
+          if (s.videoId.isNotEmpty && !seen.add(s.videoId)) {
+            duplicates.add(s);
+            continue;
+          }
+          final idx = s.videoId.isEmpty ? null : indexByVideoId[s.videoId];
+          if (idx == null) {
+            unknown.add(s);
+          } else {
+            known.add(PlaylistSongEntry(videoId: s.videoId, fileName: s.fileName, title: s.title, sourceIndex: idx));
+          }
+        }
+        known.sort((a, b) => a.sourceIndex.compareTo(b.sourceIndex));
+        final ordered = [...known, ...unknown];
+
+        final kept = songs.where((s) => !duplicates.contains(s)).map((s) => s.fileName).toList();
+        final changed = duplicates.isNotEmpty ||
+            !_sameOrder(kept, ordered.map((s) => s.fileName).toList()) ||
+            known.any((k) => songs.firstWhere((s) => s.fileName == k.fileName).sourceIndex != k.sourceIndex);
+        if (changed && save) await _save(folder, ordered);
+        return SourceOrderResult(duplicates, !_sameOrder(kept, ordered.map((s) => s.fileName).toList()));
+      });
+
+  static bool _sameOrder(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
 
   /// Reordonare manuală (drag & drop) — index-urile sunt cele din lista
   /// afișată deja (adică din `getOrderedSongs`), fără ajustarea specifică

@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/services.dart' show rootBundle, MethodChannel;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:googleapis/youtube/v3.dart' as youtube;
@@ -15,6 +15,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:provider/provider.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'dart:math';
 
 // Importurile tale de teme și widget-uri
@@ -23,6 +24,16 @@ import 'themes/app_themes.dart';
 import 'widgets/dynamic_player.dart';
 import 'download_service.dart';
 import 'playlist_manifest.dart';
+import 'library_sync.dart';
+import 'library_sync_screen.dart';
+import 'background_jobs.dart';
+import 'themes/country_detector.dart';
+import 'themes/theme_photos.dart';
+import 'themes/theme_photos_screen.dart';
+import 'radio/disk_cache.dart';
+import 'radio/radio_screen.dart';
+import 'radio/radio_station.dart';
+import 'radio/radio_favorites.dart';
 
 // ==========================================
 // ENUMERATIONS
@@ -132,6 +143,18 @@ class GoogleAuthManager {
     }
     return _instance!;
   }
+
+  static youtube.YouTubeApi youtubeApiFor(GoogleSignInCredentials credentials) {
+    final authClient = authenticatedClient(
+      http.Client(),
+      AccessCredentials(
+        AccessToken('Bearer', credentials.accessToken, DateTime.now().toUtc().add(const Duration(hours: 1))),
+        null,
+        [youtube.YouTubeApi.youtubeReadonlyScope, 'https://www.googleapis.com/auth/userinfo.email'],
+      ),
+    );
+    return youtube.YouTubeApi(authClient);
+  }
 }
 
 // ==========================================
@@ -162,7 +185,38 @@ class GlobalAudioState extends ChangeNotifier {
     }
   }
 
-  final AudioPlayer audioPlayer = AudioPlayer();
+  final AudioPlayer audioPlayer = AudioPlayer(
+    // Buffer mai mare: stream-urile radio rezistă la scurte căderi de rețea
+    // (implicit ~50 s maxim și pornire după 2,5 s).
+    audioLoadConfiguration: const AudioLoadConfiguration(
+      androidLoadControl: AndroidLoadControl(
+        minBufferDuration: Duration(seconds: 30),
+        maxBufferDuration: Duration(seconds: 120),
+        bufferForPlaybackDuration: Duration(seconds: 3),
+        bufferForPlaybackAfterRebufferDuration: Duration(seconds: 8),
+      ),
+    ),
+  );
+
+  static const MethodChannel _wifiLockChannel = MethodChannel('musicsync/wifilock');
+  bool _wifiLockHeld = false;
+
+  /// Crește la fiecare post nou pornit — răspunsurile întârziate ale
+  /// postului anterior (încărcare, metadate) sunt ignorate.
+  int _radioGeneration = 0;
+
+  /// Utilizatorul vrea radio pornit (nu l-a pus pe pauză) — doar atunci
+  /// reconectăm automat când stream-ul cade.
+  bool _radioWanted = false;
+  int _reconnectAttempts = 0;
+  Timer? _reconnectTimer;
+
+  /// Mesaj de stare pentru radio (ex. "Reconectare..."), afișat în mini-player.
+  String? radioStatus;
+
+  /// De unde a fost pornit postul pe hartă (orașul), ca mini-playerul să
+  /// poată redeschide lista acelui oraș cu postul selectat.
+  ({double lat, double lon, double zoom})? radioMapContext;
 
   List<File> playlistFiles = [];
   int currentIndex = 0;
@@ -177,11 +231,49 @@ class GlobalAudioState extends ChangeNotifier {
   Duration duration = Duration.zero;
   Duration position = Duration.zero;
 
+  /// Postul de radio care rulează (null când se redă un playlist local).
+  RadioStation? currentRadio;
+
+  /// Titlul transmis de post în stream (metadate ICY), dacă există.
+  String? radioNowPlaying;
+
   void _initListeners() {
-    audioPlayer.playerStateStream.listen((state) {
-      isPlaying = state.playing;
+    audioPlayer.icyMetadataStream.listen((icy) {
+      final radio = currentRadio;
+      if (radio == null) return;
+      // Metadatele întârziate ale postului anterior nu au voie să le
+      // suprascrie pe ale celui curent.
+      final tag = audioPlayer.sequenceState?.currentSource?.tag;
+      if (tag is! MediaItem || tag.id != 'radio:${radio.uuid}') return;
+      final title = icy?.info?.title?.trim();
+      radioNowPlaying = (title == null || title.isEmpty) ? null : title;
       notifyListeners();
     });
+
+    audioPlayer.playerStateStream.listen((state) {
+      isPlaying = state.playing;
+      final radioActive = currentRadio != null;
+      _setWifiLock(radioActive && state.playing);
+
+      if (radioActive) {
+        if (state.playing && state.processingState == ProcessingState.ready) {
+          _reconnectAttempts = 0;
+          radioStatus = null;
+        } else if (state.processingState == ProcessingState.completed) {
+          // Un stream live nu se "termină" — conexiunea a căzut.
+          _scheduleRadioReconnect();
+        }
+      }
+      notifyListeners();
+    });
+
+    audioPlayer.playbackEventStream.listen(
+      (_) {},
+      onError: (Object e, StackTrace _) {
+        debugPrint('[Audio] eroare redare: $e');
+        if (currentRadio != null) _scheduleRadioReconnect();
+      },
+    );
 
     audioPlayer.durationStream.listen((d) {
       duration = d ?? Duration.zero;
@@ -234,7 +326,121 @@ class GlobalAudioState extends ChangeNotifier {
     return _artUriCache!;
   }
 
+  void _setWifiLock(bool held) {
+    if (!Platform.isAndroid || held == _wifiLockHeld) return;
+    _wifiLockHeld = held;
+    _wifiLockChannel.invokeMethod(held ? 'acquire' : 'release').catchError((Object e) {
+      debugPrint('[WifiLock] $e');
+    });
+  }
+
+  /// [mapContext] = poziția/zoom-ul hărții de unde a fost ales postul.
+  Future<void> playRadio(RadioStation station, {({double lat, double lon, double zoom})? mapContext}) async {
+    final generation = ++_radioGeneration;
+    _reconnectTimer?.cancel();
+    _reconnectAttempts = 0;
+    _radioWanted = true;
+    radioStatus = null;
+    radioMapContext = mapContext;
+
+    playlistFiles.clear();
+    currentPlaylistTitle = null;
+    currentPlaylistModel = null;
+    currentRadio = station;
+    radioNowPlaying = null;
+    currentSongTitle = station.name;
+    currentArtist = station.country.isNotEmpty ? station.country : 'Radio';
+    notifyListeners();
+
+    await _startRadio(station, generation);
+  }
+
+  Future<void> _startRadio(RadioStation station, int generation) async {
+    await audioPlayer.setLoopMode(LoopMode.off);
+    final logo = Uri.tryParse(station.favicon);
+    final artUri = (logo != null && logo.scheme.startsWith('http')) ? logo : await _resolveArtUri();
+    if (generation != _radioGeneration) return; // între timp s-a ales alt post
+
+    await audioPlayer.setAudioSource(
+      AudioSource.uri(
+        Uri.parse(station.streamUrl),
+        tag: MediaItem(
+          id: 'radio:${station.uuid}',
+          title: station.name,
+          artist: station.fmFrequency ?? 'Radio',
+          album: station.country,
+          artUri: artUri,
+        ),
+      ),
+    );
+    if (generation != _radioGeneration) return;
+    unawaited(audioPlayer.play()); // play() se termină abia la pauză/stop — nu-l așteptăm
+    notifyListeners();
+  }
+
+  /// Stream-ul a căzut (rețea, server) — reîncercăm cu pauze tot mai mari
+  /// (2, 4, 8, 16, 30 s...), cât timp utilizatorul vrea radio pornit.
+  void _scheduleRadioReconnect() {
+    final station = currentRadio;
+    if (station == null || !_radioWanted || _reconnectTimer?.isActive == true) return;
+    if (_reconnectAttempts >= 10) {
+      radioStatus = 'Stream-ul nu mai răspunde — apasă play pentru a reîncerca';
+      _radioWanted = false;
+      notifyListeners();
+      return;
+    }
+    final delay = Duration(seconds: min(30, 2 << _reconnectAttempts));
+    _reconnectAttempts++;
+    radioStatus = 'Reconectare...';
+    notifyListeners();
+
+    final generation = _radioGeneration;
+    _reconnectTimer = Timer(delay, () async {
+      if (generation != _radioGeneration || !_radioWanted) return;
+      try {
+        await _startRadio(station, generation);
+      } catch (e) {
+        debugPrint('[Radio] reconectare eșuată: $e');
+        _scheduleRadioReconnect();
+      }
+    });
+  }
+
+  void _stopRadioSession() {
+    _radioGeneration++;
+    _radioWanted = false;
+    _reconnectTimer?.cancel();
+    radioStatus = null;
+    radioMapContext = null;
+    _setWifiLock(false);
+  }
+
+  /// Apelat după ce sync-ul a redenumit un playlist sau i-a mutat melodii
+  /// în "Removed Songs": dacă e playlistul încărcat, refacem sursa audio cu
+  /// noile căi, păstrând piesa și poziția curente (dacă piesa mai există).
+  Future<void> refreshPlaylistFromDisk(String oldTitle, Directory newDir) async {
+    if (currentPlaylistTitle != oldTitle || currentPlaylistModel == null) return;
+
+    final newTitle = newDir.path.split(Platform.pathSeparator).last;
+    String rebase(File f) => '${newDir.path}${Platform.pathSeparator}${f.path.split(Platform.pathSeparator).last}';
+
+    final currentPath = currentIndex < playlistFiles.length ? rebase(playlistFiles[currentIndex]) : null;
+    final kept = playlistFiles.map((f) => File(rebase(f))).where((f) => f.existsSync()).toList();
+
+    currentPlaylistTitle = newTitle;
+    currentPlaylistModel = LocalPlaylistModel(
+      title: newTitle,
+      directory: newDir,
+      audioFiles: kept,
+      totalYoutubeCount: currentPlaylistModel!.totalYoutubeCount,
+    );
+    await reconcileAfterLocalEdit(playlistTitle: newTitle, newFiles: kept, keepPlayingPath: currentPath);
+  }
+
   Future<void> loadPlaylist(LocalPlaylistModel playlistModel, int initialIndex) async {
+    _stopRadioSession();
+    currentRadio = null;
+    radioNowPlaying = null;
     playlistFiles = List.from(playlistModel.audioFiles);
     currentIndex = initialIndex;
     currentPlaylistTitle = playlistModel.title;
@@ -268,18 +474,33 @@ class GlobalAudioState extends ChangeNotifier {
 
     final playlistSource = ConcatenatingAudioSource(children: audioSources);
 
+    // Playlistul se reia de la capăt (ca butoanele Next/Prev din aplicație) —
+    // așa notificarea arată mereu toate cele 4 butoane, inclusiv "Previous".
+    await audioPlayer.setLoopMode(LoopMode.all);
     await audioPlayer.setAudioSource(playlistSource, initialIndex: index);
-    await audioPlayer.play();
+    unawaited(audioPlayer.play()); // play() se termină abia la pauză/stop — nu-l așteptăm
     notifyListeners();
   }
 
   Future<void> togglePlayPause({bool? forcePlay, bool? forcePause}) async {
+    if (currentRadio != null) {
+      final willPlay = forcePlay == true || (forcePause != true && !isPlaying);
+      _radioWanted = willPlay;
+      if (!willPlay) _reconnectTimer?.cancel();
+      // Stream căzut definitiv sau oprit de mult: repornim conexiunea, nu doar play().
+      if (willPlay && audioPlayer.processingState != ProcessingState.ready) {
+        _reconnectAttempts = 0;
+        radioStatus = null;
+        await _startRadio(currentRadio!, _radioGeneration);
+        return;
+      }
+    }
     if (forcePlay == true) {
-      await audioPlayer.play();
+      unawaited(audioPlayer.play());
     } else if (forcePause == true) {
       await audioPlayer.pause();
     } else {
-      isPlaying ? await audioPlayer.pause() : await audioPlayer.play();
+      isPlaying ? await audioPlayer.pause() : unawaited(audioPlayer.play());
     }
     notifyListeners();
   }
@@ -343,7 +564,7 @@ class GlobalAudioState extends ChangeNotifier {
     );
 
     if (wasPlaying) {
-      await audioPlayer.play();
+      unawaited(audioPlayer.play()); // play() se termină abia la pauză/stop — nu-l așteptăm
     } else {
       await audioPlayer.pause();
     }
@@ -352,14 +573,89 @@ class GlobalAudioState extends ChangeNotifier {
   }
 
   Future<void> stop() async {
+    _stopRadioSession();
     await audioPlayer.stop();
     playlistFiles.clear();
     currentSongTitle = "";
     currentArtist = "";
     currentPlaylistTitle = null;
     currentPlaylistModel = null;
+    currentRadio = null;
+    radioNowPlaying = null;
     notifyListeners();
   }
+}
+
+/// Fișierele playlistului în ordinea din manifest — după descărcare și
+/// sync, aceasta e exact ordinea din playlistul YouTube.
+Future<List<File>> orderFilesByManifest(Directory dir, List<File> files) async {
+  final entries = await PlaylistManifest.getOrderedSongs(dir);
+  final byName = {for (final f in files) f.path.split(Platform.pathSeparator).last: f};
+  final ordered = <File>[];
+  for (final e in entries) {
+    final f = byName.remove(e.fileName);
+    if (f != null) ordered.add(f);
+  }
+  ordered.addAll(byName.values);
+  return ordered;
+}
+
+/// Tema pentru un playlist local: cea aleasă manual (din Bibliotecă), altfel
+/// detectată din titlu și numele melodiilor; Grecia implicit.
+Future<String> resolvePlaylistTheme(LocalPlaylistModel playlist) async {
+  final override = await loadThemeOverride(playlist.directory);
+  if (override != null && appThemes.containsKey(override)) {
+    return override;
+  }
+  return detectThemeForPlaylist(
+    title: playlist.title,
+    songNames: playlist.audioFiles.map((f) => f.path.split(Platform.pathSeparator).last),
+  );
+}
+
+/// Schimbă tema automat când pornește alt playlist sau alt post de radio.
+class AutoThemeBinder extends StatefulWidget {
+  final Widget child;
+  const AutoThemeBinder({super.key, required this.child});
+
+  @override
+  State<AutoThemeBinder> createState() => _AutoThemeBinderState();
+}
+
+class _AutoThemeBinderState extends State<AutoThemeBinder> {
+  final GlobalAudioState _audio = GlobalAudioState.instance;
+  String? _lastSourceKey;
+
+  @override
+  void initState() {
+    super.initState();
+    _audio.addListener(_onAudioChanged);
+  }
+
+  @override
+  void dispose() {
+    _audio.removeListener(_onAudioChanged);
+    super.dispose();
+  }
+
+  Future<void> _onAudioChanged() async {
+    final radio = _audio.currentRadio;
+    final playlist = _audio.currentPlaylistModel;
+    final key = radio != null ? 'radio:${radio.uuid}' : (playlist != null ? 'pl:${playlist.directory.path}' : null);
+    if (key == null) {
+      _lastSourceKey = null; // oprit -> la următoarea pornire se re-detectează
+      return;
+    }
+    if (key == _lastSourceKey) return;
+    _lastSourceKey = key;
+
+    final themeId = radio != null ? themeForCountryCode(radio.countryCode) : await resolvePlaylistTheme(playlist!);
+    if (!mounted || key != _lastSourceKey) return;
+    Provider.of<ThemeProvider>(context, listen: false).applyAutoTheme(themeId);
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 // ==========================================
@@ -369,7 +665,8 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await JustAudioBackground.init(
-    androidNotificationChannelId: 'com.example.musicsync_app.audio',
+    // Canal creat nativ în MainActivity (importanță normală -> steluța apare în bara de stare).
+    androidNotificationChannelId: 'com.example.musicsync_app.player',
     androidNotificationChannelName: 'MusicSync Player',
     androidNotificationOngoing: true,
     androidStopForegroundOnPause: true,
@@ -384,6 +681,14 @@ void main() async {
   }
 
   await DownloadNotificationManager.init();
+  await DiskCache.init();
+  JobForegroundService.init();
+  await ThemePhotos.instance.init();
+  await RadioFavorites.instance.load();
+  LibraryEvents.onPlaylistChanged = GlobalAudioState.instance.refreshPlaylistFromDisk;
+  LibraryEvents.onPlaylistRemoved = (title) async {
+    if (GlobalAudioState.instance.currentPlaylistTitle == title) await GlobalAudioState.instance.stop();
+  };
 
   runApp(
     MultiProvider(
@@ -407,6 +712,7 @@ class MusicSyncApp extends StatelessWidget {
       title: 'MusicSync',
       debugShowCheckedModeBanner: false,
       theme: themeProvider.themeData,
+      builder: (context, child) => AutoThemeBinder(child: child ?? const SizedBox.shrink()),
       home: const MainHubScreen(),
     );
   }
@@ -422,8 +728,9 @@ class MainHubScreen extends StatefulWidget {
   State<MainHubScreen> createState() => _MainHubScreenState();
 }
 
-class _MainHubScreenState extends State<MainHubScreen> {
+class _MainHubScreenState extends State<MainHubScreen> with WidgetsBindingObserver {
   bool _isOffline = false;
+  bool _notificationsDenied = false;
   late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
   String? _userEmail;
   String? _userName;
@@ -432,12 +739,35 @@ class _MainHubScreenState extends State<MainHubScreen> {
   void initState() {
     super.initState();
     _checkInitialConnectivity();
+    WidgetsBinding.instance.addObserver(this);
+    _ensureNotificationPermission();
     _loadUserEmail();
     _connectivitySubscription = Connectivity().onConnectivityChanged.listen((results) {
       setState(() {
         _isOffline = results.contains(ConnectivityResult.none);
       });
     });
+  }
+
+  /// Android 13+ cere permisiune explicită pentru notificări — fără ea
+  /// dispare notificarea playerului (controale pe ecranul de blocare) și
+  /// redarea în fundal e mai ușor oprită de sistem. După o reinstalare
+  /// permisiunea se pierde, deci o cerem la fiecare pornire dacă lipsește.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Revenit din Setări -> actualizăm bannerul fără să mai întrebăm.
+    if (state == AppLifecycleState.resumed && _notificationsDenied && Platform.isAndroid) {
+      Permission.notification.status.then((status) {
+        if (mounted) setState(() => _notificationsDenied = !status.isGranted);
+      });
+    }
+  }
+
+  Future<void> _ensureNotificationPermission() async {
+    if (!Platform.isAndroid) return;
+    var status = await Permission.notification.status;
+    if (!status.isGranted) status = await Permission.notification.request();
+    if (mounted) setState(() => _notificationsDenied = !status.isGranted);
   }
 
   Future<void> _loadUserEmail() async {
@@ -457,6 +787,7 @@ class _MainHubScreenState extends State<MainHubScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _connectivitySubscription.cancel();
     super.dispose();
   }
@@ -470,55 +801,14 @@ class _MainHubScreenState extends State<MainHubScreen> {
         final themeProvider = Provider.of<ThemeProvider>(ctx, listen: false);
 
         final themes = [
-          ('grecia', 'Grecia', '🇬🇷', const Color(0xFF1A5FA8), const Color(0xFFF4EED8), [
-            'assets/images/greece/greece1.jpg',
-            'assets/images/greece/greece2.jpg',
-            'assets/images/greece/greece3.jpg',
-            'assets/images/greece/greece4.jpg',
-            'assets/images/greece/greece5.jpg',
-            'assets/images/greece/greece6.jpg',
-            'assets/images/greece/greece7.jpg'
-          ]),
-          ('armenia', 'Armenia', '🇦🇲', const Color(0xFFC8241A), const Color(0xFF1A100A), [
-            'assets/images/armenia/armenia1.jpg',
-            'assets/images/armenia/armenia2.jpg',
-            'assets/images/armenia/armenia3.jpg',
-            'assets/images/armenia/armenia4.jpg',
-            'assets/images/armenia/armenia5.jpg'
-          ]),
-          ('iran', 'Iran', '🇮🇷', const Color(0xFFD4890A), const Color(0xFF1A0F00), [
-            'assets/images/iran/iran1.jpg',
-            'assets/images/iran/iran2.jpg',
-            'assets/images/iran/iran3.jpg',
-            'assets/images/iran/iran4.jpg',
-            'assets/images/iran/iran5.jpg',
-            'assets/images/iran/iran6.jpg',
-            'assets/images/iran/iran7.jpg',
-            'assets/images/iran/iran8.jpg'
-          ]),
-          ('turcia', 'Turcia', '🇹🇷', const Color(0xFF1B6CA8), const Color(0xFF1C1208), [
-            'assets/images/turkey/turkey1.jpg',
-            'assets/images/turkey/turkey2.jpg',
-            'assets/images/turkey/turkey3.jpg',
-            'assets/images/turkey/turkey4.jpg',
-            'assets/images/turkey/turkey5.jpg',
-            'assets/images/turkey/turkey6.jpg'
-          ]),
-          ('azerbaidjan', 'Azerbaidjan', '🇦🇿', const Color(0xFF00B9E4), const Color(0xFF180A10), [
-            'assets/images/azerbaijan/azerbaijan1.jpg'
-          ]),
-          ('kurdistan', 'Kurdistan', '☀️', const Color(0xFF00B9E4), const Color(0xFF180A10), [
-            'assets/images/kurdistan/kurdistan1.jpg',
-            'assets/images/kurdistan/kurdistan2.jpg',
-            'assets/images/kurdistan/kurdistan3.jpg',
-            'assets/images/kurdistan/kurdistan4.jpg'
-          ]),
-          ('bosnia', 'Bosnia', '🇧🇦', const Color(0xFF00B9E4), const Color(0xFF180A10), [
-            'assets/images/bosnia/bosnia1.jpg'
-          ]),
-          ('central asia', 'Central Asia', '🌍', const Color(0xFF00B9E4), const Color(0xFF180A10), [
-            'assets/images/central_asia/central_asia1.jpg'
-          ]),
+          ('grecia', 'Grecia', '🇬🇷', const Color(0xFF1A5FA8), const Color(0xFFF4EED8)),
+          ('armenia', 'Armenia', '🇦🇲', const Color(0xFFC8241A), const Color(0xFF1A100A)),
+          ('iran', 'Iran', '🇮🇷', const Color(0xFFD4890A), const Color(0xFF1A0F00)),
+          ('turcia', 'Turcia', '🇹🇷', const Color(0xFF1B6CA8), const Color(0xFF1C1208)),
+          ('azerbaidjan', 'Azerbaidjan', '🇦🇿', const Color(0xFF00B9E4), const Color(0xFF180A10)),
+          ('kurdistan', 'Kurdistan', '☀️', const Color(0xFF00B9E4), const Color(0xFF180A10)),
+          ('bosnia', 'Bosnia', '🇧🇦', const Color(0xFF00B9E4), const Color(0xFF180A10)),
+          ('central asia', 'Central Asia', '🌍', const Color(0xFF00B9E4), const Color(0xFF180A10)),
         ];
 
         return DraggableScrollableSheet(
@@ -537,17 +827,32 @@ class _MainHubScreenState extends State<MainHubScreen> {
                   Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2))),
                   const SizedBox(height: 16),
                   const Text('Alege Tema', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 16),
+                  Consumer<ThemeProvider>(
+                    builder: (context, provider, _) => SwitchListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+                      value: provider.autoThemeEnabled,
+                      onChanged: provider.setAutoThemeEnabled,
+                      title: const Text('Temă automată', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      subtitle: const Text(
+                        'Se schimbă după țara playlistului sau a postului de radio (implicit Grecia)',
+                        style: TextStyle(color: Colors.white60, fontSize: 12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
                   Expanded(
-                    child: ListView.builder(
+                    child: AnimatedBuilder(
+                      animation: ThemePhotos.instance,
+                      builder: (context, _) => ListView.builder(
                       controller: controller,
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       itemCount: themes.length,
                       itemBuilder: (context, i) {
                         final t = themes[i];
                         final id = t.$1; final name = t.$2; final emoji = t.$3;
-                        final accent = t.$4; final bg = t.$5; final urls = t.$6;
-                        
+                        final accent = t.$4; final bg = t.$5;
+                        final photos = ThemePhotos.instance.photosFor(appThemes[id]!).take(7).toList();
+
                         final isSelected = Provider.of<ThemeProvider>(context).currentTheme.id == id;
                         
                         return GestureDetector(
@@ -569,13 +874,15 @@ class _MainHubScreenState extends State<MainHubScreen> {
                                 fit: StackFit.expand,
                                 children: [
                                   Row(
-                                    children: urls.map((url) => Expanded(
-                                      child: Image.asset(
-                                        url, 
-                                        fit: BoxFit.cover, 
-                                        errorBuilder: (_, __, ___) => Container(color: bg),
-                                      ),
-                                    )).toList(),
+                                    children: photos.isEmpty
+                                        ? [Expanded(child: Container(color: bg))]
+                                        : photos.map((photo) => Expanded(
+                                            child: Image(
+                                              image: photo.image,
+                                              fit: BoxFit.cover,
+                                              errorBuilder: (_, __, ___) => Container(color: bg),
+                                            ),
+                                          )).toList(),
                                   ),
                                   Container(decoration: BoxDecoration(gradient: LinearGradient(begin: Alignment.centerLeft, end: Alignment.centerRight, colors: [bg.withOpacity(0.92), bg.withOpacity(0.55), Colors.transparent]))),
                                   Padding(
@@ -589,6 +896,16 @@ class _MainHubScreenState extends State<MainHubScreen> {
                                         ]),
                                         const Spacer(),
                                         if (isSelected) Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: BoxDecoration(color: accent, borderRadius: BorderRadius.circular(20)), child: const Text('Activ', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold))),
+                                        const SizedBox(width: 8),
+                                        IconButton.filled(
+                                          style: IconButton.styleFrom(backgroundColor: Colors.black54),
+                                          icon: const Icon(Icons.add_a_photo, color: Colors.white, size: 20),
+                                          tooltip: 'Poze $name',
+                                          onPressed: () => Navigator.push(
+                                            ctx,
+                                            MaterialPageRoute(builder: (_) => ThemePhotosScreen(theme: appThemes[id]!)),
+                                          ),
+                                        ),
                                       ],
                                     ),
                                   ),
@@ -598,6 +915,7 @@ class _MainHubScreenState extends State<MainHubScreen> {
                           ),
                         );
                       },
+                    ),
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -693,139 +1011,88 @@ class _MainHubScreenState extends State<MainHubScreen> {
                         ),
                       ),
                     ),
+                    if (_notificationsDenied) ...[
+                      const SizedBox(height: 12),
+                      Center(
+                        child: Container(
+                          constraints: const BoxConstraints(maxWidth: 600),
+                          child: Material(
+                            color: Colors.orange.withValues(alpha: 0.2),
+                            borderRadius: BorderRadius.circular(8),
+                            child: ListTile(
+                              leading: const Icon(Icons.notifications_off, color: Colors.orange),
+                              title: const Text('Notificările sunt oprite', style: TextStyle(fontWeight: FontWeight.bold)),
+                              subtitle: const Text('Fără ele nu apar controalele playerului și radioul se poate opri în fundal.'),
+                              trailing: FilledButton(
+                                style: FilledButton.styleFrom(backgroundColor: Colors.orange, foregroundColor: Colors.black),
+                                onPressed: () async {
+                                  await openAppSettings();
+                                },
+                                child: const Text('Pornește'),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 32),
 
                     // CARD 1: DOWNLOADER & SYNC
-                    Center(
-                      child: Container(
-                        constraints: const BoxConstraints(maxWidth: 800),
-                        child: Card(
-                          elevation: 4,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                            side: BorderSide(
-                              color: _isOffline ? Colors.grey : moodColors.gradientColors.first, 
-                              width: 2,
-                            ),
-                          ),
-                          child: Stack(
-                            children: [
-                              InkWell(
-                                onTap: _isOffline
-                                    ? null
-                                    : () async {
-                                        await Navigator.push(
-                                          context,
-                                          MaterialPageRoute(
-                                            builder: (context) => const MusicSyncHomePage(),
-                                          ),
-                                        );
-                                        _loadUserEmail();
-                                      },
-                                borderRadius: BorderRadius.circular(16),
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 20.0, horizontal: 16.0),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(
-                                        Icons.cloud_download, 
-                                        size: 54, 
-                                        color: _isOffline ? Colors.grey : moodColors.gradientColors.first
-                                      ),
-                                      const SizedBox(height: 12),
-                                      Text(
-                                        "Downloader & Sync",
-                                        style: TextStyle(
-                                          fontSize: 20, 
-                                          fontWeight: FontWeight.bold, 
-                                          color: _isOffline ? Colors.grey : null
-                                        ),
-                                      ),
-                                      const SizedBox(height: 6),
-                                      Text(
-                                        "Music downloader",
-                                        textAlign: TextAlign.center,
-                                        style: TextStyle(color: _isOffline ? Colors.grey : Colors.grey.shade400, fontSize: 13),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              if (_isOffline)
-                                Positioned.fill(
-                                  child: Container(
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withOpacity(0.8),
-                                      borderRadius: BorderRadius.circular(16),
-                                    ),
-                                    child: const Center(
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(Icons.block, color: Colors.redAccent, size: 28),
-                                          SizedBox(width: 10),
-                                          Text(
-                                            "Indisponibil Offline",
-                                            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
+                    _HubCard(
+                      icon: Icons.cloud_download,
+                      title: "Downloader & Sync",
+                      subtitle: "Music downloader",
+                      color: moodColors.gradientColors.first,
+                      offline: _isOffline,
+                      onTap: () async {
+                        await Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (context) => const MusicSyncHomePage()),
+                        );
+                        _loadUserEmail();
+                      },
+                    ),
+                    const SizedBox(height: 24),
+
+                    // CARD 2: LIBRARY & MUSIC PLAYER
+                    _HubCard(
+                      icon: Icons.library_music,
+                      title: "Library & Music Player",
+                      subtitle: "Listen music",
+                      color: moodColors.gradientColors.last,
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (context) => const LocalLibraryScreen()),
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+
+                    // CARD 3: RADIO & SHAZAM (harta și lista merg și offline, din cache)
+                    _HubCard(
+                      icon: Icons.radio,
+                      title: "Radio & Shazam",
+                      subtitle: _isOffline ? "Hartă și posturi salvate (offline)" : "Posturi din jurul tău • recunoaștere melodii",
+                      color: moodColors.accentColor,
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          settings: const RouteSettings(name: RadioScreen.routeName),
+                          builder: (context) => const RadioScreen(),
                         ),
                       ),
                     ),
                     const SizedBox(height: 24),
 
-                    // CARD 2: LIBRARY & MUSIC PLAYER
-                    Center(
-                      child: Container(
-                        constraints: const BoxConstraints(maxWidth: 800),
-                        child: Card(
-                          elevation: 4,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                            side: BorderSide(
-                              color: moodColors.gradientColors.last, 
-                              width: 2,
-                            ),
-                          ),
-                          child: InkWell(
-                            onTap: () {
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (context) => const LocalLibraryScreen(),
-                                ),
-                              );
-                            },
-                            borderRadius: BorderRadius.circular(16),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 20.0, horizontal: 16.0),
-                              child: Column(
-                                children: [
-                                  Icon(
-                                    Icons.library_music, 
-                                    size: 54, 
-                                    color: moodColors.gradientColors.last
-                                  ),
-                                  const SizedBox(height: 12),
-                                  const Text("Library & Music Player", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    "Listen music",
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(color: Colors.grey.shade400, fontSize: 13),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
+                    // CARD 4: SYNC BIBLIOTECĂ (redenumiri + melodii scoase de pe YouTube)
+                    _HubCard(
+                      icon: Icons.sync,
+                      title: "Sync Bibliotecă",
+                      subtitle: "Nume noi de playlist și melodii scoase de pe YouTube",
+                      color: moodColors.gradientColors.first,
+                      offline: _isOffline,
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (context) => const LibrarySyncScreen()),
                       ),
                     ),
                   ],
@@ -834,6 +1101,101 @@ class _MainHubScreenState extends State<MainHubScreen> {
             ),
             const PersistentBottomMiniPlayer(),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Card de pe ecranul principal. Toate au aceeași mărime, indiferent de
+/// lungimea textului.
+class _HubCard extends StatelessWidget {
+  static const double height = 168;
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Color color;
+  final VoidCallback onTap;
+
+  /// Necesită internet și suntem offline -> card blocat cu mesaj.
+  final bool offline;
+
+  const _HubCard({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.color,
+    required this.onTap,
+    this.offline = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = offline ? Colors.grey : color;
+    return Center(
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 800),
+        height: height,
+        child: Card(
+          elevation: 4,
+          clipBehavior: Clip.antiAlias,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: accent, width: 2),
+          ),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              InkWell(
+                onTap: offline ? null : onTap,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16.0, horizontal: 16.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(icon, size: 50, color: accent),
+                      const SizedBox(height: 10),
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: offline ? Colors.grey : null),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: offline ? Colors.grey : Theme.of(context).colorScheme.onSurfaceVariant,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (offline)
+                Container(
+                  color: Colors.black.withValues(alpha: 0.8),
+                  child: const Center(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.block, color: Colors.redAccent, size: 28),
+                        SizedBox(width: 10),
+                        Text(
+                          "Indisponibil Offline",
+                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -854,15 +1216,37 @@ class PersistentBottomMiniPlayer extends StatelessWidget {
     return AnimatedBuilder(
       animation: audioState,
       builder: (context, child) {
-        if (audioState.currentPlaylistTitle == null || audioState.currentPlaylistModel == null) {
+        final radio = audioState.currentRadio;
+        if (radio == null && (audioState.currentPlaylistTitle == null || audioState.currentPlaylistModel == null)) {
           return const SizedBox.shrink();
         }
 
         final totalCount = audioState.playlistFiles.length;
         final currentPos = audioState.currentIndex + 1;
 
+        final titleText = radio != null ? (audioState.radioNowPlaying ?? radio.name) : audioState.currentSongTitle;
+        final subtitleText = radio != null
+            ? (audioState.radioStatus ??
+                "📻 ${radio.name}${radio.fmFrequency != null ? ' • ${radio.fmFrequency}' : ''}")
+            : "🎤 ${audioState.currentArtist} • 📁 ${audioState.currentPlaylistTitle} ($currentPos/$totalCount)";
+
         return InkWell(
           onTap: () {
+            if (radio != null) {
+              // Înapoi la lista orașului de unde a fost ales postul, cu el selectat.
+              if (ModalRoute.of(context)?.settings.name == RadioScreen.routeName) {
+                RadioScreen.focusPlayingRequests.value++;
+                return;
+              }
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  settings: const RouteSettings(name: RadioScreen.routeName),
+                  builder: (context) => const RadioScreen(focusPlaying: true),
+                ),
+              );
+              return;
+            }
             Navigator.push(
               context,
               MaterialPageRoute(
@@ -879,7 +1263,7 @@ class PersistentBottomMiniPlayer extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Row(
               children: [
-                Icon(Icons.music_note, color: theme.colorScheme.primary),
+                Icon(radio != null ? Icons.radio : Icons.music_note, color: theme.colorScheme.primary),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -887,13 +1271,13 @@ class PersistentBottomMiniPlayer extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        audioState.currentSongTitle,
+                        titleText,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                       ),
                       Text(
-                        "🎤 ${audioState.currentArtist} • 📁 ${audioState.currentPlaylistTitle} ($currentPos/$totalCount)",
+                        subtitleText,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(color: theme.colorScheme.secondary, fontSize: 11, fontWeight: FontWeight.bold),
@@ -905,10 +1289,13 @@ class PersistentBottomMiniPlayer extends StatelessWidget {
                   icon: Icon(audioState.isPlaying ? Icons.pause : Icons.play_arrow),
                   onPressed: () => audioState.togglePlayPause(),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.skip_next),
-                  onPressed: () => audioState.playNext(),
-                ),
+                if (radio == null)
+                  IconButton(
+                    icon: const Icon(Icons.skip_next),
+                    onPressed: () => audioState.playNext(),
+                  )
+                else
+                  FavoriteButton(station: radio),
                 IconButton(
                   icon: const Icon(Icons.close, size: 18),
                   onPressed: () => audioState.stop(),
@@ -966,7 +1353,8 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
             return ext.endsWith('.mp3') || ext.endsWith('.m4a') || ext.endsWith('.wav');
           }).toList();
 
-          files.sort((a, b) => a.lastModifiedSync().compareTo(b.lastModifiedSync()));
+          // Ordinea din manifest = ordinea din playlistul YouTube.
+          final orderedFiles = await orderFilesByManifest(entity, files);
 
           final totalYt = prefs.getInt('playlist_total_$folderName');
 
@@ -974,7 +1362,7 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
             foundPlaylists.add(LocalPlaylistModel(
               title: folderName,
               directory: entity,
-              audioFiles: files,
+              audioFiles: orderedFiles,
               totalYoutubeCount: totalYt,
             ));
           }
@@ -994,6 +1382,87 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('saved_output_dir', folder);
       await _scanLocalLibrary();
+    }
+  }
+
+  Future<void> _confirmDeletePlaylist(LocalPlaylistModel playlist) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Șterge playlistul?'),
+        content: Text(
+          '"${playlist.title}" și cele ${playlist.audioFiles.length} melodii ale lui vor fi șterse '
+          'definitiv de pe dispozitiv. Playlistul de pe YouTube nu este afectat — îl poți descărca din nou oricând.\n\n'
+          'Temele (țările) și pozele lor rămân neschimbate, iar țara aleasă pentru acest playlist '
+          'revine automat dacă îl descarci din nou.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Anulează')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Șterge'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final audioState = GlobalAudioState.instance;
+    if (audioState.currentPlaylistTitle == playlist.title) {
+      await audioState.stop();
+    }
+
+    try {
+      await deleteLocalPlaylist(playlist.directory);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Nu am putut șterge playlistul: $e')));
+      }
+    }
+    await _scanLocalLibrary();
+  }
+
+  Future<void> _choosePlaylistTheme(LocalPlaylistModel playlist) async {
+    final override = await loadThemeOverride(playlist.directory);
+    final detected = detectThemeForPlaylist(
+      title: playlist.title,
+      songNames: playlist.audioFiles.map((f) => f.path.split(Platform.pathSeparator).last),
+    );
+    if (!mounted) return;
+
+    // '' = automat
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: Text('Țara pentru "${playlist.title}"'),
+        children: [
+          RadioGroup<String>(
+            groupValue: override ?? '',
+            onChanged: (v) => Navigator.pop(dialogContext, v),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                RadioListTile<String>(
+                  value: '',
+                  title: const Text('Automat'),
+                  subtitle: Text('Detectat: ${appThemes[detected]?.name ?? detected}'),
+                ),
+                for (final t in appThemes.values) RadioListTile<String>(value: t.id, title: Text(t.name)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (choice == null) return;
+
+    await saveThemeOverride(playlist.directory, choice.isEmpty ? null : choice);
+
+    // Dacă rulează chiar acum, aplicăm imediat noua temă.
+    if (GlobalAudioState.instance.currentPlaylistTitle == playlist.title && mounted) {
+      final themeId = choice.isEmpty ? detected : choice;
+      Provider.of<ThemeProvider>(context, listen: false).applyAutoTheme(themeId);
     }
   }
 
@@ -1071,7 +1540,9 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
                               final playlist = _localPlaylists[index];
 
                               final subtitleText = playlist.totalYoutubeCount != null
-                                  ? "${playlist.audioFiles.length} / ${playlist.totalYoutubeCount} piese descărcate"
+                                  ? (playlist.audioFiles.length > playlist.totalYoutubeCount!
+                                      ? "${playlist.audioFiles.length} piese • ${playlist.totalYoutubeCount} disponibile pe YouTube"
+                                      : "${playlist.audioFiles.length} / ${playlist.totalYoutubeCount} piese descărcate")
                                   : "${playlist.audioFiles.length} piese descărcate local";
 
                               return Card(
@@ -1103,7 +1574,32 @@ class _LocalLibraryScreenState extends State<LocalLibraryScreen> {
                                       style: TextStyle(color: theme.colorScheme.secondary, fontWeight: FontWeight.bold),
                                     ),
                                   ),
-                                  trailing: const Icon(Icons.play_circle_fill, size: 36),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      PopupMenuButton<String>(
+                                        tooltip: 'Opțiuni playlist',
+                                        onSelected: (action) {
+                                          if (action == 'theme') _choosePlaylistTheme(playlist);
+                                          if (action == 'delete') _confirmDeletePlaylist(playlist);
+                                        },
+                                        itemBuilder: (_) => const [
+                                          PopupMenuItem(
+                                            value: 'theme',
+                                            child: ListTile(leading: Icon(Icons.flag_outlined), title: Text('Țară / temă')),
+                                          ),
+                                          PopupMenuItem(
+                                            value: 'delete',
+                                            child: ListTile(
+                                              leading: Icon(Icons.delete_forever, color: Colors.redAccent),
+                                              title: Text('Șterge playlistul'),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const Icon(Icons.play_circle_fill, size: 36),
+                                    ],
+                                  ),
                                   onTap: () {
                                     Navigator.push(
                                       context,
@@ -1135,16 +1631,18 @@ class PlaylistPlayerScreen extends StatefulWidget {
 
 class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
   final audioState = GlobalAudioState.instance;
-  SongSortOrder _sortOrder = SongSortOrder.oldestFirst;
-  
+  // Implicit: ordinea din playlistul YouTube (manifest).
+  SongSortOrder _sortOrder = SongSortOrder.custom;
+
   List<File> _allFiles = [];
   List<File> _displayedFiles = [];
-  List<File> _customOrderFiles = [];
+  late List<File> _customOrderFiles = List.from(widget.playlist.audioFiles);
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = "";
 
-  // Aici vom salva imaginea aleasă random la deschiderea ecranului
-  String? _randomBackgroundImage;
+  // Imaginea de fundal aleasă random din tema curentă
+  ThemePhoto? _randomBackgroundImage;
+  String? _backgroundThemeId;
 
   @override
   void initState() {
@@ -1152,7 +1650,6 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
     _allFiles = List.from(widget.playlist.audioFiles);
     _applySortingAndFiltering(shouldLoadPlaylist: true);
     _loadCustomOrder();
-    _pickRandomImage();
   }
 
   Future<void> _loadCustomOrder() async {
@@ -1186,49 +1683,13 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
     }
   }
 
-  void _pickRandomImage() {
-    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
-    final countryTheme = themeProvider.currentTheme;
-
-    final Map<String, List<String>> countryPhotos = {
-      'grecia': [
-        'assets/images/greece/greece1.jpg', 'assets/images/greece/greece2.jpg',
-        'assets/images/greece/greece3.jpg', 'assets/images/greece/greece4.jpg',
-        'assets/images/greece/greece5.jpg', 'assets/images/greece/greece6.jpg',
-        'assets/images/greece/greece7.jpg'
-      ],
-      'armenia': [
-        'assets/images/armenia/armenia1.jpg', 'assets/images/armenia/armenia2.jpg',
-        'assets/images/armenia/armenia3.jpg', 'assets/images/armenia/armenia4.jpg',
-        'assets/images/armenia/armenia5.jpg'
-      ],
-      'iran': [
-        'assets/images/iran/iran1.jpg', 'assets/images/iran/iran2.jpg',
-        'assets/images/iran/iran3.jpg', 'assets/images/iran/iran4.jpg',
-        'assets/images/iran/iran5.jpg', 'assets/images/iran/iran6.jpg',
-        'assets/images/iran/iran7.jpg', 'assets/images/iran/iran8.jpg'
-      ],
-      'turcia': [
-        'assets/images/turkey/turkey1.jpg', 'assets/images/turkey/turkey2.jpg',
-        'assets/images/turkey/turkey3.jpg', 'assets/images/turkey/turkey4.jpg',
-        'assets/images/turkey/turkey5.jpg', 'assets/images/turkey/turkey6.jpg'
-      ],
-      'azerbaidjan': ['assets/images/azerbaijan/azerbaijan1.jpg'],
-      'kurdistan': [
-        'assets/images/kurdistan/kurdistan1.jpg', 'assets/images/kurdistan/kurdistan2.jpg',
-        'assets/images/kurdistan/kurdistan3.jpg', 'assets/images/kurdistan/kurdistan4.jpg'
-      ],
-      'bosnia': ['assets/images/bosnia/bosnia1.jpg'],
-      'central asia': ['assets/images/central_asia/central_asia1.jpg'],
-    };
-
-    final urls = countryPhotos[countryTheme.id] ?? [];
-    if (urls.isNotEmpty) {
-      final random = Random();
-      setState(() {
-        _randomBackgroundImage = urls[random.nextInt(urls.length)];
-      });
-    }
+  /// Alege o poză random din tema curentă; se re-alege când tema se schimbă
+  /// (ex. comutare automată pe Turcia la pornirea unui playlist turcesc).
+  void _ensureBackgroundFor(CountryTheme theme) {
+    if (_backgroundThemeId == theme.id) return;
+    _backgroundThemeId = theme.id;
+    final photos = ThemePhotos.instance.photosFor(theme);
+    _randomBackgroundImage = photos.isEmpty ? null : photos[Random().nextInt(photos.length)];
   }
 
   @override
@@ -1275,18 +1736,18 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
       case SongSortOrder.newestFirst:
         return Icons.swap_vert;
       case SongSortOrder.custom:
-        return Icons.reorder;
+        return Icons.smart_display;
     }
   }
 
   String _sortTooltip() {
     switch (_sortOrder) {
       case SongSortOrder.oldestFirst:
-        return "Sortează: Cele mai Noi Primele";
+        return "Sortează: Cele mai noi descărcate primele";
       case SongSortOrder.newestFirst:
-        return "Sortează: Ordine Personalizată";
+        return "Sortează: Ordinea din playlistul YouTube";
       case SongSortOrder.custom:
-        return "Sortează: Cele mai Vechi Primele";
+        return "Sortează: Cele mai vechi descărcate primele";
     }
   }
 
@@ -1460,6 +1921,7 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
     final theme = Theme.of(context);
     final themeProvider = Provider.of<ThemeProvider>(context);
     final countryTheme = themeProvider.currentTheme;
+    _ensureBackgroundFor(countryTheme);
 
     return Scaffold(
       backgroundColor: countryTheme.scaffoldBackground,
@@ -1473,7 +1935,9 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
             Text(widget.playlist.title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white, shadows: [Shadow(color: Colors.black, blurRadius: 4)])),
             Text(
               widget.playlist.totalYoutubeCount != null
-                  ? "${_allFiles.length} din ${widget.playlist.totalYoutubeCount} piese salvate"
+                  ? (_allFiles.length > widget.playlist.totalYoutubeCount!
+                      ? "${_allFiles.length} piese • ${widget.playlist.totalYoutubeCount} disponibile pe YouTube"
+                      : "${_allFiles.length} din ${widget.playlist.totalYoutubeCount} piese salvate")
                   : "${_allFiles.length} piese locale",
               style: const TextStyle(fontSize: 11, color: Colors.white70, shadows: [Shadow(color: Colors.black, blurRadius: 4)]),
             ),
@@ -1503,8 +1967,8 @@ class _PlaylistPlayerScreenState extends State<PlaylistPlayerScreen> {
               // 1. IMAGINEA RANDOM PE TOT ECRANUL
               Positioned.fill(
                 child: _randomBackgroundImage != null
-                    ? Image.asset(
-                        _randomBackgroundImage!,
+                    ? Image(
+                        image: _randomBackgroundImage!.image,
                         fit: BoxFit.cover,
                         errorBuilder: (_, __, ___) => Container(color: countryTheme.scaffoldBackground),
                       )
@@ -1743,7 +2207,10 @@ class MusicSyncHomePage extends StatefulWidget {
 
 class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
   final GoogleSignIn _googleSignIn = GoogleAuthManager.instance;
-  final DownloadSyncService _downloadService = DownloadSyncService();
+  // Descărcarea rulează în DownloadJob (global) — continuă și dacă ieși din
+  // ecran sau din aplicație; ecranul doar o afișează.
+  final DownloadJob _job = DownloadJob.instance;
+  DownloadSyncService get _downloadService => _job.service;
 
   GoogleSignInCredentials? _credentials;
   List<youtube.Playlist> _playlists = [];
@@ -1751,21 +2218,41 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
   bool _isLoading = false;
   String? _userDisplayName;
 
-  String? _syncingPlaylistId;
-  String _currentSongTitle = '';
-  String _syncStatusText = '';
-  double _overallProgress = 0.0;
-  double _songProgress = 0.0;
-  bool _isCancelling = false;
+  String? get _syncingPlaylistId => _job.playlistId;
+  String get _currentSongTitle => _job.currentSongTitle;
+  String get _syncStatusText => _job.statusText;
+  double get _overallProgress => _job.overallProgress;
+  double get _songProgress => _job.songProgress;
+  bool get _isCancelling => _job.isCancelling;
+  List<String> get _logs => _job.logs;
 
-  final List<String> _logs = [];
   final ScrollController _logScrollController = ScrollController();
   String? _selectedDirectoryPath;
 
   @override
   void initState() {
     super.initState();
+    _job.addListener(_onJobChanged);
+    _loadSavedFolder();
     _autoRestoreLogin();
+  }
+
+  /// Folderul ales o dată (aici sau în Bibliotecă) rămâne folosit la descărcări.
+  Future<void> _loadSavedFolder() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('saved_output_dir');
+    if (!mounted || saved == null || !Directory(saved).existsSync()) return;
+    setState(() => _selectedDirectoryPath = saved);
+  }
+
+  void _onJobChanged() {
+    if (!mounted) return;
+    setState(() {});
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (_logScrollController.hasClients) {
+        _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent);
+      }
+    });
   }
 
   Future<void> _autoRestoreLogin() async {
@@ -1778,22 +2265,13 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
 
   @override
   void dispose() {
+    // NU oprim descărcarea — continuă în fundal.
+    _job.removeListener(_onJobChanged);
     _logScrollController.dispose();
-    _downloadService.dispose();
     super.dispose();
   }
 
-  void _addLog(String message) {
-    if (message.isEmpty) return;
-    setState(() {
-      _logs.add("${DateTime.now().toString().split('.').first.split(' ').last} - $message");
-    });
-    Future.delayed(const Duration(milliseconds: 100), () {
-      if (_logScrollController.hasClients) {
-        _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent);
-      }
-    });
-  }
+  void _addLog(String message) => _job.addLog(message);
 
   void _showErrorDialog(String title, dynamic error) {
     showDialog(
@@ -1858,7 +2336,7 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
       setState(() {
         _credentials = null;
         _playlists = [];
-        _logs.clear();
+        _job.clearLogs();
       });
     } catch (e) {
       _showErrorDialog('Eroare la Deconectare', e);
@@ -1866,17 +2344,9 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
   }
 
   Future<youtube.YouTubeApi?> _getYouTubeApi() async {
-    if (_credentials == null || _credentials!.accessToken == null) return null;
-
-    final authClient = authenticatedClient(
-      http.Client(),
-      AccessCredentials(
-        AccessToken('Bearer', _credentials!.accessToken!, DateTime.now().toUtc().add(const Duration(hours: 1))),
-        null,
-        [youtube.YouTubeApi.youtubeReadonlyScope, 'https://www.googleapis.com/auth/userinfo.email'],
-      ),
-    );
-    return youtube.YouTubeApi(authClient);
+    final creds = _credentials;
+    if (creds == null) return null;
+    return GoogleAuthManager.youtubeApiFor(creds);
   }
 
   Future<void> _fetchPlaylists() async {
@@ -1892,6 +2362,18 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
       final prefs = await SharedPreferences.getInstance();
       final savedIds = prefs.getStringList('custom_playlists') ?? [];
       _customPlaylistIds = savedIds.toSet();
+
+      // Playlisturile deja descărcate (ID-ul e ținut în folderul lor) apar
+      // mereu în listă — chiar dacă lista salvată s-a pierdut (ex. reinstalare).
+      final root = prefs.getString('saved_output_dir');
+      if (root != null) {
+        for (final dir in listPlaylistFolders(Directory(root))) {
+          final id = (await PlaylistMetaStore.read(dir)).playlistId;
+          if (id != null && !fetched.any((p) => p.id == id) && _customPlaylistIds.add(id)) {
+            await prefs.setStringList('custom_playlists', _customPlaylistIds.toList());
+          }
+        }
+      }
 
       for (String customId in _customPlaylistIds) {
         if (!fetched.any((p) => p.id == customId)) {
@@ -1948,24 +2430,7 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
     }
   }
 
-  Future<void> _stopDownload() async {
-    _addLog('[USER ACTION] Butonul STOP a fost apăsat.');
-    setState(() {
-      _isCancelling = true;
-      _syncStatusText = 'Oprire în curs...';
-    });
-    _downloadService.cancelDownload();
-
-    Future.delayed(const Duration(seconds: 2), () {
-      if (mounted && _syncingPlaylistId != null) {
-        setState(() {
-          _syncingPlaylistId = null;
-          _isCancelling = false;
-        });
-        _addLog('[INFO] Interfața a fost deblocată forțat.');
-      }
-    });
-  }
+  Future<void> _stopDownload() async => _job.cancel();
 
   String _extractPlaylistId(String input) {
     String clean = input.trim();
@@ -2003,8 +2468,14 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
       await _saveCustomPlaylistsToDisk();
       _addLog('[SUCCESS] S-a adăugat: "${newPlaylist.snippet?.title}"!');
     } else {
-      _addLog('[ERROR] Nu s-au putut prelua detaliile playlist-ului.');
-      _showErrorDialog('Eroare adăugare playlist', 'Nu s-a putut găsi playlist-ul cu acest link.');
+      _addLog('[ERROR] Nu s-au putut prelua detaliile playlist-ului $cleanId.');
+      _showErrorDialog(
+        'Eroare adăugare playlist',
+        'Nu s-a putut citi playlistul cu ID-ul:\n$cleanId\n\n'
+        '• Playlistul trebuie să fie Public sau Nepublicat (Unlisted) — cele Private ale altor conturi nu pot fi citite.\n'
+        '• Mixurile generate automat de YouTube (ID care începe cu "RD") nu sunt accesibile prin API.\n'
+        '• Verifică să fi copiat linkul întreg (cu "list=...").',
+      );
     }
   }
 
@@ -2027,6 +2498,9 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
           title: const Text('Adaugă Playlist Colaborativ / Link'),
           content: TextField(
             controller: urlController,
+            autofocus: true,
+            maxLines: 3,
+            minLines: 1,
             decoration: const InputDecoration(
               hintText: 'Lipește link-ul sau ID-ul playlist-ului',
               border: OutlineInputBorder(),
@@ -2062,102 +2536,35 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
       }
     }
 
-    final playlistId = playlist.id!;
     final playlistTitle = playlist.snippet?.title ?? 'Playlist';
-
-    setState(() {
-      _syncingPlaylistId = playlistId;
-      _currentSongTitle = '';
-      _syncStatusText = 'Obținere melodii de la API YouTube...';
-      _overallProgress = 0.0;
-      _songProgress = 0.0;
-      _isCancelling = false;
-    });
-
-    _addLog('Inițiere descărcare playlist: "$playlistTitle"');
-
-    try {
-      List<youtube.PlaylistItem> itemsList = [];
-      String? nextPageToken;
-
-      do {
-        final res = await youtubeApi.playlistItems.list(
-          ['snippet', 'contentDetails'],
-          playlistId: playlistId,
-          maxResults: 50,
-          pageToken: nextPageToken,
-        );
-        if (res.items != null) itemsList.addAll(res.items!);
-        nextPageToken = res.nextPageToken;
-      } while (nextPageToken != null && !_isCancelling);
-
-      if (_isCancelling) return;
-
-      if (itemsList.isEmpty) {
-        _addLog('Playlist-ul este gol.');
-        _showErrorDialog('Sync', 'Playlistul este gol.');
-        return;
-      }
-
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setInt('playlist_total_$playlistTitle', itemsList.length);
-
-      await _executeDownloadProcess(playlistTitle, itemsList);
-    } catch (e) {
-      _addLog('[EXCEPȚIE GENERALĂ] $e');
-      _showErrorDialog('Eroare Descărcare', e);
-    } finally {
-      if (mounted) {
-        setState(() {
-          _syncingPlaylistId = null;
-          _overallProgress = 0.0;
-          _songProgress = 0.0;
-          _isCancelling = false;
-        });
-      }
-    }
-  }
-
-  Future<void> _executeDownloadProcess(String playlistTitle, List<youtube.PlaylistItem> itemsList) async {
-    _addLog('S-au găsit ${itemsList.length} piese în playlist.');
-
-    final result = await _downloadService.downloadPlaylistWithProgress(
+    final outcome = await _job.run(
+      api: youtubeApi,
+      playlistId: playlist.id!,
       playlistTitle: playlistTitle,
-      items: itemsList,
       targetDirectoryPath: _selectedDirectoryPath!,
-      onProgress: (DownloadProgressInfo info) {
-        if (mounted) {
-          setState(() {
-            _currentSongTitle = info.currentSongTitle;
-            _syncStatusText = info.statusMessage;
-            _overallProgress = info.overallProgress;
-            _songProgress = info.songProgress;
-          });
-          if (info.logMessage.isNotEmpty) _addLog(info.logMessage);
-        }
-      },
     );
 
-    if (mounted) {
-      if (result.isCancelled) {
-        _addLog('[STOP] Descărcare oprită de utilizator.');
+    // Ecranul poate fi închis între timp — descărcarea a continuat în fundal.
+    if (outcome == null || !mounted) return;
+    final result = outcome.result;
+    if (outcome.error != null) {
+      _showErrorDialog('Eroare Descărcare', outcome.error);
+    } else if (outcome.emptyPlaylist) {
+      _showErrorDialog('Sync', 'Playlistul este gol.');
+    } else if (result != null && !result.isCancelled) {
+      final totalDone = result.successCount + result.skippedCount;
+      if (result.failedSongs.isNotEmpty) {
+        _showErrorDialog(
+          'Rezultat Descărcare',
+          'S-au procesat $totalDone din ${outcome.itemCount} piese.\n\nErori:\n• ${result.failedSongs.join('\n• ')}',
+        );
       } else {
-        final totalDone = result.successCount + result.skippedCount;
-        _addLog('Finalizat! Noi: ${result.successCount}, Existente: ${result.skippedCount}');
-
-        if (result.failedSongs.isNotEmpty) {
-          _showErrorDialog(
-            'Rezultat Descărcare',
-            'S-au procesat $totalDone din ${itemsList.length} piese.\n\nErori:\n• ' + result.failedSongs.join('\n• '),
-          );
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Playlist "$playlistTitle" sincronizat cu succes!'),
-              backgroundColor: Colors.green,
-            ),
-          );
-        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Playlist "$playlistTitle" sincronizat cu succes!'),
+            backgroundColor: Colors.green,
+          ),
+        );
       }
     }
   }
@@ -2275,21 +2682,36 @@ class _MusicSyncHomePageState extends State<MusicSyncHomePage> {
                                     margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                                     child: ListTile(
                                       leading: const Icon(Icons.queue_music, size: 32),
-                                      title: Text(item.snippet?.title ?? 'Fără titlu'),
+                                      title: Text(
+                                        item.snippet?.title ?? 'Fără titlu',
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
                                       subtitle: Text("${item.contentDetails?.itemCount ?? 0} piese pe YouTube ${isCustomSaved ? '• (Salvat)' : ''}"),
+                                      // Butoane doar cu iconițe: cu text, titlul rămânea strivit într-o coloană îngustă.
                                       trailing: Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
                                           if (isCustomSaved && _syncingPlaylistId == null)
                                             IconButton(
                                               icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                                              tooltip: 'Scoate din listă',
                                               onPressed: () => _removeCustomPlaylist(item.id!),
                                             ),
-                                          ElevatedButton.icon(
-                                            icon: Icon(isThisSyncing ? Icons.sync : Icons.download),
-                                            label: Text(isThisSyncing ? 'În curs...' : 'Descărcă'),
-                                            onPressed: _syncingPlaylistId != null ? null : () => _syncPlaylistLocal(item),
-                                          ),
+                                          isThisSyncing
+                                              ? const Padding(
+                                                  padding: EdgeInsets.all(12),
+                                                  child: SizedBox(
+                                                    width: 24,
+                                                    height: 24,
+                                                    child: CircularProgressIndicator(strokeWidth: 3),
+                                                  ),
+                                                )
+                                              : IconButton.filledTonal(
+                                                  icon: const Icon(Icons.download),
+                                                  tooltip: 'Descarcă',
+                                                  onPressed: _syncingPlaylistId != null ? null : () => _syncPlaylistLocal(item),
+                                                ),
                                         ],
                                       ),
                                     ),

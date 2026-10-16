@@ -8,6 +8,8 @@ import 'package:path/path.dart' as p;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'library_sync.dart';
 import 'playlist_manifest.dart';
 
 
@@ -111,6 +113,37 @@ class DownloadSyncService {
     return await FilePicker.platform.getDirectoryPath();
   }
 
+  /// Lista completă a unui playlist prin yt-dlp (fără API-ul YouTube) —
+  /// rezervă pentru playlisturile pe care API-ul oficial nu le poate pagina.
+  static Future<List<RemoteSong>> listPlaylistWithYtDlp(String playlistId) async {
+    String raw;
+    if (Platform.isAndroid) {
+      final result = await _ytDlpChannel
+          .invokeMethod<String>('listPlaylist', {'playlistId': playlistId})
+          .timeout(const Duration(minutes: 3));
+      raw = result ?? '';
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      if (decoded['success'] != true) throw Exception('yt-dlp: ${decoded['error']}');
+      return [
+        for (final e in (decoded['entries'] as List).whereType<Map>())
+          RemoteSong(e['id'] as String? ?? '', e['title'] as String? ?? ''),
+      ];
+    }
+
+    final exe = File('yt-dlp.exe').existsSync() ? File('yt-dlp.exe').absolute.path : 'yt-dlp';
+    final proc = await Process.run(
+      exe,
+      ['--flat-playlist', '-J', '--no-warnings', 'https://www.youtube.com/playlist?list=$playlistId'],
+      stdoutEncoding: utf8,
+    ).timeout(const Duration(minutes: 3));
+    if (proc.exitCode != 0) throw Exception('yt-dlp: ${proc.stderr}');
+    final decoded = jsonDecode(proc.stdout as String) as Map<String, dynamic>;
+    return [
+      for (final e in (decoded['entries'] as List? ?? []).whereType<Map>())
+        RemoteSong(e['id'] as String? ?? '', e['title'] as String? ?? ''),
+    ];
+  }
+
   String _getYtDlpPathWindows() {
     final localExecutable = File('yt-dlp.exe');
     if (localExecutable.existsSync()) {
@@ -121,6 +154,7 @@ class DownloadSyncService {
 
   Future<DownloadResult> downloadPlaylistWithProgress({
     required String playlistTitle,
+    String? playlistId,
     required List<youtube.PlaylistItem> items,
     required String targetDirectoryPath,
     required Function(DownloadProgressInfo) onProgress,
@@ -143,11 +177,28 @@ class DownloadSyncService {
     // Tăiem orice verificare restrictivă de certificate
     _httpClient!.badCertificateCallback = (cert, host, port) => true;
 
-    final safePlaylistTitle = _cleanFileName(playlistTitle);
-    final playlistFolder = Directory(p.join(targetDirectoryPath, safePlaylistTitle));
-    if (!await playlistFolder.exists()) {
-      await playlistFolder.create(recursive: true);
+    // Cu ID: refolosește folderul deja legat de acest playlist (redenumit la
+    // titlul curent dacă s-a schimbat pe YouTube), ca să nu apară duplicate.
+    final Directory playlistFolder;
+    if (playlistId != null) {
+      playlistFolder = await resolveDownloadFolder(
+        root: Directory(targetDirectoryPath),
+        playlistId: playlistId,
+        playlistTitle: playlistTitle,
+      );
+    } else {
+      playlistFolder = Directory(p.join(targetDirectoryPath, cleanFileName(playlistTitle)));
+      if (!await playlistFolder.exists()) {
+        await playlistFolder.create(recursive: true);
+      }
     }
+
+    // Totalul afișat = melodiile care se pot descărca (fără cele șterse/private).
+    final remoteSongs = [
+      for (final item in items) RemoteSong(item.snippet?.resourceId?.videoId ?? '', item.snippet?.title ?? ''),
+    ];
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(playlistTotalPrefsKey(p.basename(playlistFolder.path)), availableSongCount(remoteSongs));
 
     // Melodii deja descărcate în ALTE playlisturi — le copiem în loc să le
     // redescărcăm prin yt-dlp.
@@ -178,7 +229,7 @@ class DownloadSyncService {
         continue;
       }
 
-      final safeSongTitle = _cleanFileName(rawTitle);
+      final safeSongTitle = cleanFileName(rawTitle);
       final targetM4a = File(p.join(playlistFolder.path, '$safeSongTitle.m4a'));
       final targetMp3 = File(p.join(playlistFolder.path, '$safeSongTitle.mp3'));
 
@@ -413,15 +464,33 @@ class DownloadSyncService {
     _httpClient?.close(force: true);
     _httpClient = null;
 
+    // Ordinea finală = exact ordinea din playlistul YouTube.
+    try {
+      final indexById = <String, int>{};
+      for (int k = 0; k < remoteSongs.length; k++) {
+        indexById.putIfAbsent(remoteSongs[k].videoId, () => k);
+      }
+      final order = await PlaylistManifest.applySourceOrder(playlistFolder, indexById);
+      for (final dup in order.duplicates) {
+        final file = File(p.join(playlistFolder.path, dup.fileName));
+        if (await file.exists()) {
+          await PlaylistManifest.moveToRemovedSongs(
+            rootDir: Directory(targetDirectoryPath),
+            source: file,
+            sourcePlaylistFolderName: p.basename(playlistFolder.path),
+          );
+        }
+        await PlaylistManifest.removeByFileName(playlistFolder, dup.fileName);
+      }
+    } catch (e) {
+      debugPrint('[ORDINE] $e');
+    }
+
     return DownloadResult(
       isCancelled: _isCancelled,
       successCount: successCount,
       skippedCount: skippedCount,
       failedSongs: failedSongs,
     );
-  }
-
-  String _cleanFileName(String name) {
-    return name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
   }
 }

@@ -66,5 +66,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Locația e folosită pentru a găsi posturile de radio din apropiere.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Microfonul e folosit pentru a recunoaște melodia care se aude.</string>
 </dict>
 </plist>

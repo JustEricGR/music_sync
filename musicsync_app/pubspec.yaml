@@ -20,7 +20,7 @@ dependencies:
   google_sign_in_all_platforms: ^1.1.1  # Pachetul compatibil Windows, Android & iOS
   http: ^1.6.0
   youtube_explode_dart: ^3.1.0  # Pentru extragerea stream-ului audio din YouTube
-  archive: ^3.6.1               # Pentru crearea fișierului .zip în memorie/disc
+  archive: ^4.0.2               # Pentru crearea fișierului .zip în memorie/disc
   file_picker: ^8.0.0           # Pentru selectarea folderului de către utilizator
   path_provider: ^2.1.2         # Pentru directoare temporare/implicite
   shared_preferences: ^2.5.5
@@ -34,6 +34,11 @@ dependencies:
   just_audio: ^0.9.40          # replaces audioplayers
   just_audio_background: ^0.0.1-beta.13
   permission_handler: ^11.3.1
+  flutter_map: ^8.3.2
+  latlong2: ^0.10.1
+  geolocator: ^14.0.2
+  record: ^7.1.2
+  url_launcher: ^6.3.3
 
 dev_dependencies:
   flutter_launcher_icons: ^0.13.1
@@ -58,10 +63,12 @@ flutter:
     - assets/images/iran/
     - assets/images/kurdistan/
     - assets/images/turkey/
+    - assets/geo/countries.json
+    - assets/geo/places.json
 
 msix_config:
   display_name: MusicSync
   publisher_name: Eric
   identity_name: com.eric.musicsync
-  capabilities: internetClient
+  capabilities: internetClient,location,microphone
   install_certificate: true

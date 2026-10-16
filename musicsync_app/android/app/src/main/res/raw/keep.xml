@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  audio_service caută iconițele butoanelor din notificarea playerului după nume
+  (getIdentifier), așa că la build-ul release "resource shrinking" le ștergea:
+  notificarea nu mai apărea deloc ("You must specify an icon resource id").
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/audio_service_*,@drawable/ic_notification_star,@mipmap/ic_launcher,@mipmap/launcher_icon" />

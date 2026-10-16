@@ -128,3 +128,50 @@ def download_audio(video_id, output_path):
         )
 
         return result
+
+
+def list_playlist(playlist_id):
+    """
+    Lista completă a unui playlist (ID + titlu, în ordinea din playlist),
+    fără API-ul YouTube — folosită când API-ul oficial nu poate pagina
+    playlistul (repetă aceeași pagină la nesfârșit pentru unele liste).
+
+    Întoarce JSON: {"success": bool, "title": str, "entries": [{"id", "title"}], "error": str}
+    """
+    import json
+
+    url = f"https://www.youtube.com/playlist?list={playlist_id}"
+    try:
+        opts = {
+            "extract_flat": "in_playlist",
+            "skip_download": True,
+            "quiet": True,
+            "no_warnings": True,
+            "extractor_retries": 3,
+            "socket_timeout": 30,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        entries = []
+        for entry in info.get("entries") or []:
+            if not entry:
+                continue
+            entries.append({
+                "id": entry.get("id") or "",
+                "title": entry.get("title") or "",
+            })
+
+        return json.dumps({
+            "success": True,
+            "title": info.get("title") or "",
+            "entries": entries,
+            "error": "",
+        })
+    except Exception as exc:
+        return json.dumps({
+            "success": False,
+            "title": "",
+            "entries": [],
+            "error": str(exc),
+        })
